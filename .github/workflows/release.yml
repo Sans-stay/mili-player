@@ -1,0 +1,72 @@
+# 自动打包：把源码在 GitHub 的机器上构建成可直接运行的 zip
+# ---------------------------------------------------------------
+# 触发方式有两种：
+#   1. 推送形如 v1.0 的标签   -> 构建完自动创建 Release 并附上 zip
+#   2. 在 Actions 页面手动点   -> 只上传构建产物，不建 Release
+#
+# 相比在自己电脑上手动打包，这里有个额外好处：
+# CI 机器是全新的，里面没有你的 data/，所以不可能把你的登录 Cookie 打进包里。
+
+name: 自动打包
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# 创建 Release 需要写权限
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 取出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装依赖
+        run: npm ci
+        env:
+          # 仓库里的 .npmrc 指向国内镜像；GitHub 的机器在国外，走官方源反而快
+          npm_config_registry: https://registry.npmjs.org/
+
+      # 这一步会连带下载 Electron 运行时（约 150 MB），CI 上通常一两分钟
+      - name: 打包
+        run: npm run package
+
+      # 兜底：万一将来有东西往 dist 里写了个人数据，这里清掉。
+      # CI 机器是干净的，正常情况下不会有 data/ 目录。
+      - name: 清掉个人数据
+        shell: pwsh
+        run: Remove-Item -Recurse -Force "dist/Mili播放器-win32-x64/data" -ErrorAction SilentlyContinue
+
+      # 用 7-Zip 而不是 PowerShell 的 Compress-Archive：
+      # 后者打包中文文件名（Mili播放器.exe、启动 Mili 播放器.vbs）会变成乱码。
+      # 先进到 dist 里再压，否则包里会多一层 dist/ 目录。
+      - name: 压缩成 zip
+        shell: pwsh
+        run: |
+          Push-Location dist
+          & "C:\Program Files\7-Zip\7z.exe" a -tzip "..\Mili播放器-win64.zip" "Mili播放器-win32-x64"
+          Pop-Location
+
+      - name: 上传构建产物（手动触发时也能下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mili播放器-win64
+          path: Mili播放器-win64.zip
+
+      - name: 发布 Release（仅推送标签时）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Mili播放器-win64.zip
+          generate_release_notes: true
