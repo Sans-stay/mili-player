@@ -30,7 +30,17 @@ jobs:
       - name: 准备 Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # @electron/packager@20 要求 Node >= 22.12.0，别降到 20
+          node-version: '22'
+
+      # 出问题时一眼看出这次构建的是哪个提交，免得对着旧日志排查
+      - name: 打印构建信息
+        shell: pwsh
+        run: |
+          Write-Host "ref : ${{ github.ref }}"
+          Write-Host "sha : ${{ github.sha }}"
+          Write-Host "node: $(node -v)"
+          Write-Host "npm : $(npm -v)"
 
       - name: 安装依赖
         run: npm ci
