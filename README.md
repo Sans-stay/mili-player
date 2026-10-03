@@ -253,39 +253,70 @@ Limbus Company 终战那种效果：每句歌词在**屏幕内随机落点**、*
 
 ## 目录结构
 
+### 哪些要上传，哪些不要
+
+仓库里只放**源码**。下面这些东西体积大、又能随时重建，或者干脆是隐私，
+都被 `.gitignore` 排除了：
+
+| 目录 | 传? | 是什么 | 怎么重建 |
+| --- | --- | --- | --- |
+| `data/` | ❌ | **设置、自定义色号、QQ 音乐登录 Cookie** | 运行程序自动生成 |
+| `node_modules/` | ❌ | 依赖包（约 300 MB） | `npm install` |
+| `.electron-cache/` | ❌ | Electron 运行时压缩包（约 260 MB） | `npm run setup:electron` |
+| `.npm-cache/` | ❌ | npm 下载缓存 | 自动 |
+| `dist/` | ❌ | 打包出来的 exe | `npm run package` |
+| `shots/` | ❌ | 截图 | `npm run shot` |
+| `testdata/` | ❌ | 测试音频 | `npm run testdata` |
+| `.reference/` | ❌ | 第三方 QRC 解密参考实现（GPL-3.0，只用于对照） | `node scripts/fetch-qrc-reference.js` |
+| `src/` `scripts/` `assets/` `docs/` | ✅ | 源码、脚本、素材、文档截图 | — |
+
+> `data/` 里那个 `qqmusic-session.json` 是你的登录凭据。
+> 提交前用 `git add --dry-run .` 扫一眼最稳妥。
+
+### 目录说明
+
 ```
 mili播放器/
-├── package.json
-├── scripts/
-│   ├── start.js              # 启动器（清理 ELECTRON_RUN_AS_NODE 后拉起 Electron）
-│   ├── install-electron.ps1  # 手动安装 Electron 运行时
-│   ├── fetch-electron.js     # 下载 Electron 压缩包
-│   ├── make-assets.py        # 用代码生成封面 / 图标
-│   ├── gen-qrc-des.py        # 把参考实现 AST 转译成 JS 版自定义 3DES
-│   ├── verify-qrc-des.js     # 校验 3DES 移植与参考实现逐字节一致
-│   ├── test-qqmusic.js       # QQ 音乐链路自检（搜索 / 歌词 / 时间轴）
-│   ├── test-regressions.js   # 回归测试（隐藏播放 / 设置不重建字幕）
-│   └── screenshot.js         # 无头截图，用于验收 UI
-├── assets/                   # 生成的封面、图标、托盘图标
-├── data/                     # 设置、Electron 缓存的落盘位置（绿色版，不写系统目录）
+├── package.json              # 依赖与 npm 脚本
+├── README.md
+├── 启动 Mili 播放器.cmd       # 双击启动（保留控制台，看日志用）
+├── 启动 Mili 播放器（无窗口）.vbs
+├── docs/                     # README 里引用的截图 + 上传 GitHub 的指南
+├── assets/                   # 封面、图标、托盘图标（make-assets.py 生成，程序运行要用）
+├── scripts/                  # 开发与测试脚本，都不是程序的一部分
+│   ├── start.js              #   启动器（清 ELECTRON_RUN_AS_NODE、沙箱降级重试）
+│   ├── install-electron.ps1  #   手动安装 Electron 运行时
+│   ├── fetch-electron.js     #   下载 Electron 压缩包
+│   ├── make-assets.py        #   生成封面 / 图标
+│   ├── make-dist-launchers.js#   给打包产物补上启动脚本
+│   ├── gen-qrc-des.py        #   把参考实现 AST 转译成 JS 版自定义 3DES
+│   ├── verify-qrc-des.js     #   校验 3DES 移植与参考实现逐字节一致
+│   ├── test-*.js             #   各类测试（见「测试」一节）
+│   ├── probe-*.js            #   接口侦察脚本（排查 QQ 音乐 / 沙箱环境用）
+│   └── screenshot.js         #   无头截图，用于验收 UI
 └── src/
-    ├── main/
-    │   ├── main.js           # 主进程：窗口管理、状态中枢、托盘、快捷键、IPC
-    │   ├── qqmusic.js        # QQ 音乐客户端（搜索 / 歌词 / 播放地址）
-    │   ├── qqmusic-session.js# 登录窗口 + 登录态存取
-    │   ├── qrc.js            # QRC 解密：3DES + zlib + 剥掉 XML 外壳
-    │   ├── qrc-des.js        # 自定义 3DES（由 gen-qrc-des.py 自动生成，勿手改）
-    │   ├── defaults.js       # 悬浮字幕默认设置
-    │   ├── preload-player.js
-    │   └── preload-overlay.js
-    ├── shared/
-    │   ├── lyric-parser.js   # 歌词解析（LRC / 增强 LRC / QRC 逐字）
-    │   ├── color-util.js     # 色号归一化 + 写入 CSS 变量（两个窗口共用）
-    │   └── demo-data.js      # 内置演示歌曲与歌词
+    ├── main/                 # 主进程
+    │   ├── main.js           #   窗口管理、状态中枢、托盘、快捷键、IPC
+    │   ├── qqmusic.js        #   QQ 音乐客户端（搜索 / 歌词 / 播放地址）
+    │   ├── qqmusic-session.js#   登录窗口 + 登录态存取
+    │   ├── qrc.js            #   QRC 解密：3DES + zlib + 剥掉 XML 外壳
+    │   ├── qrc-des.js        #   自定义 3DES（gen-qrc-des.py 自动生成，勿手改）
+    │   ├── audio-proxy.js    #   mili-audio:// 代理，媒体请求头可控
+    │   ├── audio-meta.js     #   ID3v2 标签解析 + 文件名推断
+    │   ├── color-presets.js  #   内置色号 + 与已保存色号的合并逻辑
+    │   ├── defaults.js       #   默认设置
+    │   └── preload-*.js      #   两个窗口的 contextBridge
+    ├── shared/               # 两个窗口共用的纯逻辑（没有 Electron 依赖，可直接单测）
+    │   ├── lyric-parser.js   #   歌词解析（LRC / 增强 LRC / QRC 逐字）
+    │   ├── theme-rules.js    #   彩蛋识别规则 + 规则到颜色的解析
+    │   ├── color-util.js     #   色号归一化 + 写入 CSS 变量
+    │   └── demo-data.js      #   内置演示歌曲
     └── renderer/
         ├── player/           # 主窗口
         └── overlay/          # 悬浮歌词窗口
 ```
+
+上传到 GitHub 的完整步骤见 [`docs/如何上传到 GitHub.md`](docs/如何上传到%20GitHub.md)。
 
 ---
 
