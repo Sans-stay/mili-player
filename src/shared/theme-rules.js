@@ -70,6 +70,25 @@
       color: '#b30000',
       match: /in\s*hell\s*we\s*live|lament/i,
     },
+    {
+      label: 'Iron Lotus',
+      preset: '燃烧红',
+      color: '#f00000',
+      match: /iron\s*lotus|铁血莲华/i,
+    },
+    {
+      label: '1000x1000',
+      preset: '清新绿',
+      color: '#4ede9f',
+      match: /1000\s*x\s*1000/i,
+    },
+    {
+      label: '昔涟',
+      preset: '涟漪粉',
+      color: '#f047ea',
+      match: /昔涟/i,
+      miliOnly: false,
+    },
   ];
 
   // 用户自定义规则（来自数据目录的 color-theme.json），优先级高于内置
@@ -130,8 +149,8 @@
     const haystack = `${track.title || ''} ${track.album || ''}`.toLowerCase();
 
     for (const rule of allRules()) {
-      // 内置规则一律要求是 Mili；用户自定义的默认不要求
-      if (!rule.custom ? !mili : (rule.miliOnly && !mili)) continue;
+      const needMili = rule.miliOnly === undefined ? !rule.custom : rule.miliOnly;
+      if (needMili && !mili) continue;
       if (rule.match.test(haystack)) return rule;
     }
     return null;

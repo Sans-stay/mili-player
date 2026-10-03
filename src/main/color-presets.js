@@ -19,7 +19,7 @@ const COLOR_PRESETS = [
   { key: 'ocean', name: '沧海蓝', song: 'Compass', color: '#3224ff', builtin: true },
   { key: 'ripple', name: '涟漪粉', song: 'What the Ripple Sees', color: '#f047ea', builtin: true },
   { key: 'inferno', name: '炼狱红', song: 'In Hell We Live, Lament', color: '#b30000', builtin: true },
-  { key: 'fresh', name: '清新绿', song: '', color: '#4ede9f', builtin: true },
+  { key: 'fresh', name: '清新绿', song: '1000x1000', color: '#4ede9f', builtin: true },
 ];
 
 /**
