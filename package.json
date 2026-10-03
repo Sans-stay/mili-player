@@ -19,7 +19,7 @@
     "shot": "node scripts/start.js scripts/screenshot.js",
     "setup:electron": "powershell -ExecutionPolicy Bypass -File scripts/install-electron.ps1",
     "package": "npm run package:raw && node scripts/make-dist-launchers.js",
-    "package:raw": "node node_modules/@electron/packager/bin/electron-packager.mjs . \"Mili播放器\" --platform=win32 --arch=x64 --electron-version=33.2.1 --electron-zip-dir=.electron-cache --out=dist --overwrite --asar --ignore=\"^/(dist|shots|testdata|data|scripts|README\\.md|\\.reference|\\.npm-cache|\\.electron-cache|\\.gitignore|\\.npmrc)\""
+    "package:raw": "node scripts/ensure-electron-cache.js && node node_modules/@electron/packager/bin/electron-packager.mjs . \"Mili播放器\" --platform=win32 --arch=x64 --electron-version=33.2.1 --electron-zip-dir=.electron-cache --out=dist --overwrite --asar --ignore=\"^/(dist|shots|testdata|data|scripts|README\\.md|\\.reference|\\.npm-cache|\\.electron-cache|\\.gitignore|\\.npmrc)\""
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",
