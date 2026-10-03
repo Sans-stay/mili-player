@@ -761,7 +761,7 @@ function bindSettings() {
 
 /**
  * 识别到特定曲目就自动切主题色。
- * 规则表在 src/shared/theme-rules.js；用户自己加的规则在数据目录的 theme-rules.json。
+ * 规则表在 src/shared/theme-rules.js；用户自己加的规则在数据目录的 color-theme.json。
  * @returns {boolean} 是否切换了
  */
 function maybeAutoTheme(track, from) {

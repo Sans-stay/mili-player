@@ -6,7 +6,7 @@
 'use strict';
 
 /*
- * 默认色号取自 Mili 为 Limbus Company 各章终战写的曲子。
+ * 默认色号。带 song 的都是 Mili 的曲子，识别到对应曲目时会自动切过去（彩蛋）。
  * key 是稳定标识：允许用户双击改名，改名后升级时仍能认出是哪一个内置色号。
  */
 const COLOR_PRESETS = [
@@ -15,11 +15,15 @@ const COLOR_PRESETS = [
   { key: 'hope', name: '希望黄', song: 'Fly, My Wings', color: '#fcfe8b', builtin: true },
   { key: 'tiantian', name: '清流蓝', song: 'TIAN TIAN', color: '#57c8ff', builtin: true },
   { key: 'saikai', name: '温暖红', song: 'SAIKAI', color: '#ff6b6b', builtin: true },
+  { key: 'dark', name: '黯淡黑', song: 'Gone Angels', color: '#303030', builtin: true },
+  { key: 'ocean', name: '沧海蓝', song: 'Compass', color: '#3224ff', builtin: true },
+  { key: 'ripple', name: '涟漪粉', song: 'What the Ripple Sees', color: '#f047ea', builtin: true },
+  { key: 'inferno', name: '炼狱红', song: 'In Hell We Live, Lament', color: '#b30000', builtin: true },
   { key: 'fresh', name: '清新绿', song: '', color: '#4ede9f', builtin: true },
 ];
 
 /**
- * 合并「已保存的色号」与「内置色号（含用户在 presets.json 里加的那些）」。
+ * 合并「已保存的色号」与「内置色号（含用户在 color-theme.json 里加的那些）」。
  * ---------------------------------------------------------------
  * 必须同时满足：
  *   1. 新增的内置色号要补进老配置（否则升级后看不到新色号）
@@ -34,6 +38,8 @@ function mergeColorPresets(saved, extra) {
   const list = Array.isArray(saved) ? saved.map((p) => ({ ...p })) : [];
   const defaults = [...COLOR_PRESETS, ...(Array.isArray(extra) ? extra : [])];
 
+  const normColor = (value) => String(value || '').trim().toLowerCase();
+
   /** 从已保存列表里取出一项（取走就删，避免后面重复） */
   const take = (predicate) => {
     const index = list.findIndex(predicate);
@@ -42,9 +48,14 @@ function mergeColorPresets(saved, extra) {
 
   const out = [];
   for (const preset of defaults) {
-    // 先按 key 认（改名后也认得出），再退回按名字认（老数据没有 key）
+    // 认领顺序：key（改名后也认得出）-> 名字（老数据没有 key）-> 颜色值
+    //
+    // 第三层是为了「用户把自定义色号改了名，后来它变成了内置」这种情况：
+    // 改名后原来那个已经没有 key、名字也对不上，只有颜色值还认得出来。
+    // 不加这层就会出现「燃烧红」和「炼狱红」两个一模一样颜色的胶囊。
     const hit = (preset.key ? take((p) => p.key === preset.key) : null)
-      || take((p) => p.name === preset.name);
+      || take((p) => p.name === preset.name)
+      || take((p) => !p.key && normColor(p.color) === normColor(preset.color));
 
     if (hit) {
       if (!hit.key && preset.key) hit.key = preset.key;   // 回填 key

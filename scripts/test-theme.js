@@ -95,45 +95,57 @@ check('preset 查不到且没给 color -> 返回 null（好让上层给出明确
 check('预设被改名后靠自带 color 兜底仍然有效',
   theme.resolve({ preset: '斑驳紫', color: '#a98bff' }, [{ name: '我的紫', color: '#a98bff' }])?.color === '#a98bff');
 
-console.log('\n--- 用真实配置文件跑一遍 ---');
+console.log('\n--- 内置规则与色号表的一致性 ---');
+{
+  const { COLOR_PRESETS } = require('../src/main/color-presets');
+  const names = new Set(COLOR_PRESETS.map((p) => p.name));
+
+  // 每条规则的 preset 必须在色号表里真实存在 —— 抓两个文件之间的笔误
+  for (const rule of theme.RULES) {
+    check(`规则「${rule.label}」指向的色号「${rule.preset}」存在`, names.has(rule.preset));
+  }
+
+  // 反过来：用规则自己的标题去识别，必须命中它自己
+  let misses = 0;
+  for (const rule of theme.RULES) {
+    const hit = theme.detect({ title: rule.label, artist: 'Mili' });
+    if (!hit || hit.preset !== rule.preset) {
+      misses += 1;
+      console.log(`  ❌ 标题「${rule.label}」识别到的是 ${hit ? hit.preset : 'null'}`);
+    }
+  }
+  check(`${theme.RULES.length} 条内置规则都能被自己的标题命中`, misses === 0);
+}
+
+console.log('\n--- 用户自己的配置（data/color-theme.json）---');
 try {
   const fs = require('node:fs');
   const path = require('node:path');
-  const ROOT = path.join(__dirname, '..');
-  const presetsFile = path.join(ROOT, 'data', 'presets.json');
-  const rulesFile = path.join(ROOT, 'data', 'theme-rules.json');
+  const file = path.join(__dirname, '..', 'data', 'color-theme.json');
 
-  if (fs.existsSync(presetsFile) && fs.existsSync(rulesFile)) {
-    const userPresets = JSON.parse(fs.readFileSync(presetsFile, 'utf8')).presets || [];
-    const userRules = JSON.parse(fs.readFileSync(rulesFile, 'utf8')).rules || [];
-    const allPresets = [...require('../src/main/color-presets').COLOR_PRESETS, ...userPresets];
+  if (fs.existsSync(file)) {
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const userPresets = Array.isArray(cfg.presets) ? cfg.presets : [];
+    const userRules = Array.isArray(cfg.rules) ? cfg.rules : [];
+    const { COLOR_PRESETS } = require('../src/main/color-presets');
+    const allPresets = [...COLOR_PRESETS, ...userPresets];
 
     console.log(`  读到 ${userPresets.length} 个自定义色号、${userRules.length} 条自定义规则`);
     theme.setCustom(userRules);
 
-    // 每首歌用「标题 + Mili」去跑，应该能识别出规则里指定的色号
-    const probeTitles = {
-      'Gone Angels': '黯淡黑',
-      'Compass': '沧海蓝',
-      'What the Ripple Sees': '涟漪粉',
-      'In Hell We Live, Lament': '炼狱红',
-    };
-
-    for (const [title, wantPreset] of Object.entries(probeTitles)) {
-      const hit = theme.detect({ title, artist: 'Mili' });
+    for (const rule of userRules) {
+      const hit = theme.detect({ title: rule.label, artist: 'Mili' });
       const resolved = theme.resolve(hit, allPresets);
-      const ok = Boolean(hit) && Boolean(resolved) && resolved.name === wantPreset;
-      check(`「${title}」-> ${resolved ? `${resolved.name} ${resolved.color}` : '(未识别)'}`,
-        ok,
-        ok ? '' : `期望切到「${wantPreset}」${hit ? '' : '（规则没命中）'}`);
+      check(`「${rule.label}」-> ${resolved ? `${resolved.name} ${resolved.color}` : '(未识别)'}`,
+        Boolean(resolved),
+        resolved ? '' : `规则没命中，或色号「${rule.preset}」不存在`);
     }
-
     theme.setCustom([]);
   } else {
-    console.log('  （没有 data/presets.json 或 data/theme-rules.json，跳过）');
+    console.log('  （没有 data/color-theme.json，跳过）');
   }
 } catch (err) {
-  check('读取真实配置', false, err.message);
+  check('读取用户配置', false, err.message);
 }
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');

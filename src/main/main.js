@@ -47,9 +47,11 @@ const DATA_DIR = pickDataDir();
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const ASSETS = path.join(ROOT, 'assets');
 
-// 用户可自行编辑的两个文件：自定义色号 / 彩蛋规则
-const CUSTOM_PRESETS_FILE = path.join(DATA_DIR, 'presets.json');
-const CUSTOM_RULES_FILE = path.join(DATA_DIR, 'theme-rules.json');
+// 用户可自行编辑的文件：自定义色号 + 彩蛋规则，放一起
+const CUSTOM_THEME_FILE = path.join(DATA_DIR, 'color-theme.json');
+// 旧版把它们拆成两个文件，仍然读取以兼容（内容会被并入上面那个）
+const LEGACY_PRESETS_FILE = path.join(DATA_DIR, 'presets.json');
+const LEGACY_RULES_FILE = path.join(DATA_DIR, 'theme-rules.json');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 app.setPath('userData', path.join(DATA_DIR, 'electron'));
@@ -88,25 +90,6 @@ audioProxy.registerScheme();          // 必须在 app ready 之前
 let customPresets = [];
 let customThemeRules = [];
 
-/**
- * 读一个「用户可编辑」的 JSON 配置。
- * 接受两种写法：裸数组，或 {"_说明": "...", "<key>": [...]} —— 后者能自带说明文字，
- * 对用户友好得多（JSON 不支持注释）。
- */
-function readUserConfig(file, key) {
-  try {
-    if (!fs.existsSync(file)) return [];
-    const raw = fs.readFileSync(file, 'utf8').trim();
-    if (!raw) return [];
-    const data = JSON.parse(raw);
-    if (Array.isArray(data)) return data;
-    return Array.isArray(data[key]) ? data[key] : [];
-  } catch (err) {
-    console.warn(`[mili] 读取 ${path.basename(file)} 失败，已当作空配置：${err.message}`);
-    return [];
-  }
-}
-
 /** 第一次运行时写一份带说明的空模板，用户照着改就行 */
 function ensureUserConfig(file, template) {
   try {
@@ -116,27 +99,54 @@ function ensureUserConfig(file, template) {
   }
 }
 
-const PRESETS_TEMPLATE = `${JSON.stringify({
-  _说明: '在这里加你自己的歌词色号，存盘后重启 Mili 播放器生效。'
-    + 'name=显示名；color=#rrggbb；song=出处（可留空，只用于悬停提示）；builtin=true 表示不允许右键删除。',
+/*
+ * 色号和彩蛋规则放在同一个文件里 —— 只有一处要改，不用在两个文件之间来回找。
+ * 内置的那 10 个色号 / 9 条规则写在源码里（src/main/color-presets.js
+ * 与 src/shared/theme-rules.js），这里追加的是用户自己加的。
+ */
+const THEME_TEMPLATE = `${JSON.stringify({
+  _说明: '自定义色号与彩蛋规则，改完存盘重启 Mili 播放器生效。'
+    + 'presets=你自己的色号（name 显示名、color 是 #rrggbb、song 出处可留空、builtin:true 表示不许右键删除）；'
+    + 'rules=彩蛋规则（match 是正则字符串，拿「标题+专辑」匹配；'
+    + 'preset 写色号的名字即可，颜色会自动按名字取，color 只在名字查不到时兜底；'
+    + 'miliOnly:true 表示只在艺术家是 Mili 时生效）。'
+    + '内置的色号和规则不需要写在这里，直接在面板里改就行。',
   presets: [],
-}, null, 2)}\n`;
-
-const RULES_TEMPLATE = `${JSON.stringify({
-  _说明: '彩蛋规则：听到匹配的歌就自动切主题色。'
-    + 'match=正则字符串（大小写不敏感，拿「标题+专辑」去匹配）；'
-    + 'preset=要切到的色号名，和 presets.json 或面板里的色号名一致即可，颜色会自动按名字取；'
-    + 'color=可选，写 #rrggbb，仅在 preset 名字查不到时兜底；'
-    + 'miliOnly=true 表示只在艺术家是 Mili 时生效（不写则不限制艺术家）。',
   rules: [],
 }, null, 2)}\n`;
 
 function loadUserConfigs() {
-  ensureUserConfig(CUSTOM_PRESETS_FILE, PRESETS_TEMPLATE);
-  ensureUserConfig(CUSTOM_RULES_FILE, RULES_TEMPLATE);
+  ensureUserConfig(CUSTOM_THEME_FILE, THEME_TEMPLATE);
 
-  customPresets = readUserConfig(CUSTOM_PRESETS_FILE, 'presets');
-  customThemeRules = readUserConfig(CUSTOM_RULES_FILE, 'rules');
+  let data = {};
+  try {
+    const raw = fs.readFileSync(CUSTOM_THEME_FILE, 'utf8').trim();
+    if (raw) data = JSON.parse(raw) || {};
+  } catch (err) {
+    console.warn(`[mili] 读取 ${path.basename(CUSTOM_THEME_FILE)} 失败，已当作空配置：${err.message}`);
+    data = {};
+  }
+
+  customPresets = Array.isArray(data.presets) ? data.presets : [];
+  customThemeRules = Array.isArray(data.rules) ? data.rules : [];
+
+  // 兼容旧版把两者拆成两个文件的情况：读到内容就并进来
+  for (const [file, key, target] of [
+    [LEGACY_PRESETS_FILE, 'presets', 'presets'],
+    [LEGACY_RULES_FILE, 'rules', 'rules'],
+  ]) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const legacy = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const list = Array.isArray(legacy) ? legacy : legacy[key];
+      if (!Array.isArray(list) || !list.length) continue;
+
+      if (target === 'presets') customPresets = [...customPresets, ...list];
+      else customThemeRules = [...customThemeRules, ...list];
+      console.log(`[mili] 从旧文件 ${path.basename(file)} 并入 ${list.length} 项，`
+        + `建议改用 ${path.basename(CUSTOM_THEME_FILE)} 统一管理`);
+    } catch { /* 旧文件坏了就忽略 */ }
+  }
 
   if (customPresets.length) console.log(`[mili] 读到 ${customPresets.length} 个自定义色号`);
   if (customThemeRules.length) console.log(`[mili] 读到 ${customThemeRules.length} 条自定义彩蛋规则`);
@@ -158,18 +168,18 @@ function loadSettings() {
   }
   delete saved.scatterAngle;
 
-  // 内置色号后来新增过（比如清新绿、希望黄），老配置里没有 —— 合并补齐并去重
-  const presetCountBefore = Array.isArray(saved.colorPresets) ? saved.colorPresets.length : 0;
+  // 内置色号后来新增过（比如清新绿、希望黄），老配置里没有 —— 合并补齐并去重。
+  // 比较用内容而不是数量：曾经因为「数量恰好没变」导致修正结果没落盘，
+  // 内存里其实已经改好了，文件却还是旧的。
+  const presetsBefore = JSON.stringify(Array.isArray(saved.colorPresets) ? saved.colorPresets : []);
   saved.colorPresets = mergeColorPresets(saved.colorPresets, customPresets);
 
   const merged = { ...DEFAULT_SETTINGS, ...saved };
 
-  // 配置被修正过（补了新增色号 / 去掉了重复项）就立刻落盘，
-  // 免得每次启动都要再修一遍，用户看到的文件也和面板一致
-  if (presetCountBefore !== merged.colorPresets.length) {
+  if (presetsBefore !== JSON.stringify(merged.colorPresets)) {
     try {
       fs.writeFileSync(SETTINGS_FILE, JSON.stringify(merged, null, 2), 'utf8');
-      console.log(`[mili] 已修正色号配置：${presetCountBefore} -> ${merged.colorPresets.length}`);
+      console.log(`[mili] 已修正色号配置：${JSON.parse(presetsBefore).length} -> ${merged.colorPresets.length} 个`);
     } catch (err) {
       console.warn('[mili] 修正后的配置写盘失败：', err.message);
     }

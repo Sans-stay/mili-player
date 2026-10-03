@@ -89,11 +89,11 @@ const names = (list) => list.map((p) => p.name).join(' / ');
     names(out));
 }
 
-// 8. 用户在 presets.json 里加的自定义文件色号
+// 8. 用户在 color-theme.json 里加的自定义色号
 {
   const extra = [{ name: '海盐蓝', color: '#7fd4ff', song: '某首歌', builtin: true }];
   const out = mergeColorPresets([], extra);
-  check('presets.json 里的色号会被带上',
+  check('color-theme.json 里的色号会被带上',
     out.length === COLOR_PRESETS.length + 1 && out.some((p) => p.name === '海盐蓝'),
     `${out.length} 个：${names(out)}`);
 }
@@ -104,6 +104,25 @@ const names = (list) => list.map((p) => p.name).join(' / ');
   check('内置列表里有「希望黄」且色值正确',
     Boolean(hope) && hope.name === '希望黄' && hope.color.toLowerCase() === '#fcfe8b',
     hope ? `${hope.name} ${hope.color}（出处 ${hope.song}）` : '找不到');
+}
+
+// 10. 自定义色号被改名后，它后来变成内置时不该多出一个同色的
+{
+  // 模拟：用户原来有个没 key 的「炼狱红」，改名成「燃烧红」，
+  // 之后「炼狱红」进了内置列表
+  const renamed = [{ name: '燃烧红', color: '#b30000' }];
+  const out = mergeColorPresets(renamed);
+  const same = out.filter((p) => p.color.toLowerCase() === '#b30000');
+  check('改名后的色号变成内置时，按颜色值认领而不是重复添加',
+    same.length === 1 && same[0].name === '燃烧红' && same[0].key === 'inferno',
+    `${out.length} 个：${names(out)}`);
+}
+
+// 11. 合并是幂等的（跑两次结果一样）
+{
+  const once = mergeColorPresets([]);
+  const twice = mergeColorPresets(once);
+  check('合并是幂等的', JSON.stringify(once) === JSON.stringify(twice), `${once.length} 个`);
 }
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');

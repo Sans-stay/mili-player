@@ -4,7 +4,7 @@
  * 内置规则是彩蛋，所以**只在艺术家确实是 Mili 时才生效**（详见 isMiliArtist）。
  * 否则一首第五和弦的《Hero》或者随便什么同名曲都会被染色。
  *
- * 用户也可以在数据目录的 theme-rules.json 里加自己的规则（见 setCustom），
+ * 用户也可以在数据目录的 color-theme.json 里加自己的规则（见 setCustom），
  * 那种情况下默认不要求艺术家是 Mili —— 毕竟是你自己明确指定的。
  */
 (function (root, factory) {
@@ -46,9 +46,33 @@
       color: '#ff6b6b',
       match: /saikai|再会|再見/i,
     },
+    {
+      label: 'Gone Angels',
+      preset: '黯淡黑',
+      color: '#303030',
+      match: /gone\s*angels|逝去的天使/i,
+    },
+    {
+      label: 'Compass',
+      preset: '沧海蓝',
+      color: '#3224ff',
+      match: /compass|指南针|罗盘/i,
+    },
+    {
+      label: 'What the Ripple Sees',
+      preset: '涟漪粉',
+      color: '#f047ea',
+      match: /what\s*the\s*ripple\s*sees|涟漪/i,
+    },
+    {
+      label: 'In Hell We Live, Lament',
+      preset: '炼狱红',
+      color: '#b30000',
+      match: /in\s*hell\s*we\s*live|lament/i,
+    },
   ];
 
-  // 用户自定义规则（来自数据目录的 theme-rules.json），优先级高于内置
+  // 用户自定义规则（来自数据目录的 color-theme.json），优先级高于内置
   let customRules = [];
 
   /**
