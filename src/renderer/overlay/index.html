@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>Mili 悬浮歌词</title>
+  <link rel="stylesheet" href="overlay.css">
+</head>
+<body class="mode-scatter">
+  <div class="stage" id="stage">
+    <div class="hint" id="hint">按住拖动 · 右键菜单</div>
+
+    <!-- 底部字幕条模式 -->
+    <div class="bar-layer" id="barLayer">
+      <div class="pill" id="pill">
+        <div class="row prev" id="prevRow"></div>
+        <div class="row cur" id="curRow"><span class="words" id="curWords"></span></div>
+        <div class="row trans" id="transRow"></div>
+        <div class="row next" id="nextRow"></div>
+      </div>
+    </div>
+
+    <!-- 散落模式：铺满屏幕的透明画布 -->
+    <div class="scatter-layer" id="scatterLayer"></div>
+
+    <div class="idle" id="idle">
+      <div class="idle-title" id="idleTitle">Mili 播放器</div>
+      <div class="idle-sub" id="idleSub">等待播放…</div>
+    </div>
+  </div>
+
+  <script src="../../shared/lyric-parser.js"></script>
+  <script src="../../shared/color-util.js"></script>
+  <script src="overlay.js"></script>
+</body>
+</html>

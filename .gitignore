@@ -1,0 +1,32 @@
+# ===================================================================
+# 哪些东西不该上传到 Git —— 每条都写了原因
+# ===================================================================
+
+# 依赖包：npm install 就能装回来，几百 MB
+node_modules/
+
+# 下载缓存：Electron 运行时压缩包等，加起来几百 MB
+.npm-cache/
+.electron-cache/
+
+# 个人数据：里面有 QQ 音乐登录态、你的设置和自定义色号。
+# 【最重要的一条】qqmusic-session.json 是你的登录 Cookie，泄露等于把账号交出去。
+# 如果确实想分享自己的色号配置，单独把 presets.json / theme-rules.json
+# 复制到别处，不要整个 data/ 传上去。
+data/
+
+# 打包产物：npm run package 随时能重新生成
+dist/
+build/
+
+# 生成物：截图与测试音频，都能用脚本重新生成
+shots/
+testdata/
+
+# 第三方参考实现（只用于对照 QRC 解密算法，GPL-3.0，不随本项目分发）
+.reference/
+
+# 杂项
+*.log
+Thumbs.db
+desktop.ini

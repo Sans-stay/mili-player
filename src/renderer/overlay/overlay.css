@@ -1,0 +1,267 @@
+/* ===================================================================
+   Mili 播放器 · 悬浮歌词窗口
+   两种模式：
+     bar     底部字幕条（窄窗、可拖动）
+     scatter 散落歌词（铺满屏幕、随机落点、倾斜、逐字浮现）
+   =================================================================== */
+
+:root {
+  --fs: 44px;                 /* 基础字号，由设置面板控制 */
+  --fg: #ffffff;
+  --lyric: #a98bff;           /* 歌词色号，由设置面板控制 */
+  --lyric-rgb: 169, 139, 255;
+  --accent: 139, 124, 255;
+  --accent-2: 79, 216, 255;
+  --shadow: 0 2px 16px rgba(0, 0, 0, 0.92), 0 0 4px rgba(0, 0, 0, 0.8);
+  --scatter-shadow: 0 3px 22px rgba(0, 0, 0, 0.92), 0 0 4px rgba(0, 0, 0, 0.75);
+  --align: center;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  font-family: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+}
+
+.stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* 未锁定时悬停提示（散落模式铺满屏幕，没有可拖动的地方，直接隐藏） */
+.hint {
+  position: absolute;
+  right: 10px;
+  bottom: 4px;
+  z-index: 10;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  pointer-events: none;
+}
+body.mode-bar:not(.locked) .stage:hover .hint { opacity: 1; }
+body.mode-scatter .hint { display: none; }
+
+/* ================================================== 底部字幕条模式 */
+
+body.mode-bar .stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 18px;
+}
+body.mode-bar .scatter-layer { display: none; }
+
+.pill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.18em;
+  max-width: 100%;
+  padding: 10px 26px;
+  border-radius: 20px;
+  transition: background 0.3s ease, backdrop-filter 0.3s ease;
+}
+body.backdrop .pill {
+  background: rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(6px);
+}
+
+.row {
+  width: 100%;
+  text-align: var(--align);
+  line-height: 1.3;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cur {
+  font-size: var(--fs);
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: var(--lyric);
+}
+body.shadow .cur,
+body.shadow .prev,
+body.shadow .next,
+body.shadow .trans { text-shadow: var(--shadow); }
+
+.cur .word {
+  color: rgba(var(--lyric-rgb), 0.30);
+  transition: color 0.14s linear, transform 0.14s ease, text-shadow 0.18s ease;
+  display: inline-block;
+  white-space: pre;
+}
+.cur .word.done {
+  color: var(--lyric);
+  text-shadow: 0 0 16px rgba(var(--lyric-rgb), 0.8), 0 0 3px rgba(0, 0, 0, 0.7);
+}
+/* 正在唱的字：不加白，只把主题色的光打得更烈 */
+.cur .word.active {
+  color: var(--lyric);
+  transform: scale(1.045);
+  text-shadow: 0 0 10px rgba(var(--lyric-rgb), 1), 0 0 34px rgba(var(--lyric-rgb), 0.95), 0 0 68px rgba(var(--lyric-rgb), 0.7);
+}
+body.shadow .cur .word.done { text-shadow: var(--shadow), 0 0 16px rgba(var(--lyric-rgb), 0.75); }
+body.shadow .cur .word.active { text-shadow: var(--shadow), 0 0 14px rgba(var(--lyric-rgb), 1), 0 0 38px rgba(var(--lyric-rgb), 0.95); }
+
+@keyframes lineIn {
+  from { opacity: 0; transform: translateY(16px) scale(0.98); filter: blur(8px); }
+  to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+.cur.enter { animation: lineIn 0.55s cubic-bezier(0.16, 0.9, 0.24, 1) both; }
+
+.prev, .next {
+  font-size: calc(var(--fs) * 0.5);
+  font-weight: 600;
+}
+.prev { color: rgba(var(--lyric-rgb), 0.24); }
+.next { color: rgba(var(--lyric-rgb), 0.36); }
+.trans {
+  font-size: calc(var(--fs) * 0.52);
+  font-weight: 600;
+  color: rgba(var(--accent-2), 0.9);
+  margin-top: 0.08em;
+}
+.prev:empty, .next:empty, .trans:empty { display: none; }
+
+/* ==================================================== 散落歌词模式 */
+
+body.mode-scatter .bar-layer { display: none; }
+
+.scatter-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/*
+ * 每句歌词是一个绝对定位的块：
+ * 以中心点为锚（translate(-50%,-50%)）再叠加倾斜，
+ * 位置由 JS 按「旋转后的外接矩形」计算，保证整块不出屏、且尽量互不重叠。
+ */
+.scatter-item {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  font-weight: 800;
+  line-height: 1.12;
+  letter-spacing: 0.015em;
+  transform: translate(-50%, -50%);   /* 以中心点锚定落点 */
+  opacity: 1;
+  transition: opacity 0.9s ease;
+  pointer-events: none;
+  color: var(--lyric);
+}
+.scatter-item.out { opacity: 0; }
+
+/*
+ * 倾斜单独放内层。
+ * 落点和角度互不干扰：改倾斜范围时只动内层，
+ * 于是可以放心给它加过渡，做出「原地重新倾斜」而不是重掷落点。
+ */
+.scatter-tilt {
+  display: inline-block;
+  white-space: nowrap;
+  transform-origin: 50% 50%;
+}
+.scatter-tilt.tilt-ready {
+  transition: transform 0.5s cubic-bezier(0.22, 0.9, 0.24, 1);
+}
+
+/*
+ * 逐字浮现：每个字有自己的时间点。
+ * 只用「上浮 + 淡入」—— 不用 filter:blur()，
+ * 因为大面积模糊过渡在透明窗口上会留下合成的残影。
+ *
+ * 外层 .ch 负责「浮现」（位移 + 缩放），内层 .ch-i 负责「颤抖」，
+ * 拆成两层是因为两者都用 transform，放同一个元素上会互相覆盖。
+ */
+.scatter-item .ch {
+  display: inline-block;
+  white-space: pre;
+  opacity: 0;
+  transform: translateY(0.24em) scale(0.9);
+  transition:
+    opacity 0.5s ease,
+    transform 0.62s cubic-bezier(0.18, 1.14, 0.32, 1);
+}
+.scatter-item .ch.on {
+  opacity: 1;
+  transform: none;
+}
+
+/* 微颤：幅度随字号缩放，用 linear 多段关键帧做出「不稳」的神经质手感 */
+@keyframes charTremble {
+  0%   { transform: translate3d(0, 0, 0) rotate(0deg); }
+  12%  { transform: translate3d(0.013em, -0.016em, 0) rotate(-0.32deg); }
+  25%  { transform: translate3d(-0.015em, 0.010em, 0) rotate(0.24deg); }
+  37%  { transform: translate3d(0.009em, 0.015em, 0) rotate(-0.18deg); }
+  50%  { transform: translate3d(-0.012em, -0.012em, 0) rotate(0.30deg); }
+  62%  { transform: translate3d(0.015em, 0.008em, 0) rotate(-0.26deg); }
+  75%  { transform: translate3d(-0.009em, 0.014em, 0) rotate(0.20deg); }
+  87%  { transform: translate3d(0.011em, -0.009em, 0) rotate(-0.28deg); }
+  100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+}
+
+.scatter-item .ch-i {
+  display: inline-block;
+  white-space: pre;
+}
+/* 每个字的周期和相位都不同（--tremble-* 由 JS 随机），所以不会整句同步晃 */
+body.tremble .scatter-item .ch-i {
+  animation: charTremble var(--tremble-dur, 2.2s) linear infinite;
+  animation-delay: var(--tremble-delay, 0s);
+}
+
+/* 正在唱的那个字：不加白，只把主题色的光打得更烈 */
+.scatter-item .ch.active {
+  color: var(--lyric);
+  text-shadow: 0 0 14px rgba(var(--lyric-rgb), 1), 0 0 42px rgba(var(--lyric-rgb), 0.9);
+}
+.scatter-item .ch.on:not(.active) {
+  text-shadow: 0 0 22px rgba(var(--lyric-rgb), 0.5);
+}
+
+body.shadow .scatter-item { text-shadow: var(--scatter-shadow); }
+body.shadow .scatter-item .ch.on:not(.active) {
+  text-shadow: var(--scatter-shadow), 0 0 22px rgba(var(--lyric-rgb), 0.5);
+}
+body.shadow .scatter-item .ch.active {
+  text-shadow: var(--scatter-shadow), 0 0 16px rgba(var(--lyric-rgb), 1), 0 0 44px rgba(var(--lyric-rgb), 0.9);
+}
+
+/* ======================================================== 空状态 */
+
+.idle {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+body.idle .bar-layer { display: none; }
+body.idle .scatter-layer { display: none; }
+body.idle .idle { display: flex; }
+.idle-title { font-size: calc(var(--fs) * 0.6); font-weight: 700; color: var(--lyric); }
+.idle-sub { font-size: calc(var(--fs) * 0.34); color: rgba(var(--lyric-rgb), 0.5); }

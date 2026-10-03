@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data: https:; media-src 'self' file: data: blob: mili-audio:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>Mili 播放器</title>
+  <link rel="stylesheet" href="player.css">
+</head>
+<body>
+  <!-- 环境光：用封面图放大模糊铺底 -->
+  <div class="ambient" id="ambient"></div>
+  <div class="vignette"></div>
+
+  <header class="titlebar">
+    <div class="brand">
+      <span class="logo"></span>
+      <span class="brand-name">Mili</span>
+      <span class="brand-sub">播放器</span>
+    </div>
+
+    <div class="actions">
+      <button class="chip" id="btnLyric" title="显示 / 隐藏悬浮歌词">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M4 6h16M4 12h10M4 18h7"/></svg>
+        <span>悬浮歌词</span>
+      </button>
+      <button class="icon-btn" id="btnOpen" title="打开本地音乐（也可以直接把文件拖进来）">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M3 7a2 2 0 012-2h3.5l2 2H19a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
+      </button>
+      <button class="icon-btn" id="btnSearch" title="搜索 QQ 音乐">
+        <svg viewBox="0 0 24 24" class="ico"><circle cx="11" cy="11" r="7"/><path d="M20.5 20.5L16 16"/></svg>
+      </button>
+      <button class="icon-btn" id="btnSettings" title="字幕样式">
+        <svg viewBox="0 0 24 24" class="ico">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1A1.7 1.7 0 008 19.4a1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H2a2 2 0 110-4h.1A1.7 1.7 0 003.6 8a1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3H8a1.7 1.7 0 001-1.5V2a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9V8a1.7 1.7 0 001.5 1H22a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="btnMin" title="最小化">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M5 12h14"/></svg>
+      </button>
+      <button class="icon-btn danger" id="btnClose" title="退出">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <div class="cover-wrap">
+      <div class="cover-glow" id="coverGlow"></div>
+      <img class="cover" id="cover" alt="专辑封面">
+    </div>
+
+    <div class="meta">
+      <div class="title-row">
+        <h1 id="title">未在播放</h1>
+        <span class="badge" id="badge">演示</span>
+      </div>
+      <p class="artist" id="artist">—</p>
+      <p class="album" id="album">—</p>
+    </div>
+
+    <div class="progress">
+      <span class="time" id="timeCur">00:00</span>
+      <div class="bar" id="bar">
+        <div class="bar-fill" id="barFill"></div>
+        <div class="bar-knob" id="barKnob"></div>
+      </div>
+      <span class="time" id="timeTotal">00:00</span>
+    </div>
+
+    <div class="controls">
+      <button class="ctl" id="btnLoop" title="循环：列表">
+        <svg viewBox="0 0 24 24" class="ico" id="loopIcon">
+          <path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/>
+          <path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/>
+        </svg>
+      </button>
+
+      <button class="ctl" id="btnPrev" title="上一首">
+        <svg viewBox="0 0 24 24" class="ico fill"><path d="M7 5h2v14H7zM19 5v14L9.5 12z"/></svg>
+      </button>
+
+      <button class="play" id="btnPlay" title="播放 / 暂停">
+        <svg viewBox="0 0 24 24" class="ico fill" id="playIcon"><path d="M8 5.2v13.6L19 12z"/></svg>
+      </button>
+
+      <button class="ctl" id="btnNext" title="下一首">
+        <svg viewBox="0 0 24 24" class="ico fill"><path d="M15 5h2v14h-2zM5 5v14l9.5-7z"/></svg>
+      </button>
+
+      <div class="volume">
+        <button class="ctl small" id="btnMute" title="静音">
+          <svg viewBox="0 0 24 24" class="ico" id="volIcon">
+            <path d="M11 5L6.5 9H3v6h3.5L11 19z"/>
+            <path d="M15.5 8.5a5 5 0 010 7"/><path d="M18.5 6a9 9 0 010 12"/>
+          </svg>
+        </button>
+        <div class="vol-bar" id="volBar"><div class="vol-fill" id="volFill"></div></div>
+      </div>
+    </div>
+
+    <section class="lyrics">
+      <div class="lyrics-inner" id="lyricsInner"></div>
+    </section>
+  </main>
+
+  <!-- 真正的播放引擎；没有音频时可以继续用虚拟时钟跑演示 -->
+  <audio id="audio" preload="metadata"></audio>
+
+  <!-- 短暂提示 -->
+  <div class="toast" id="toast"></div>
+
+  <!-- 拖拽载入提示 -->
+  <div class="drop-mask" id="dropMask">
+    <div class="drop-inner">
+      <svg viewBox="0 0 24 24" class="ico"><path d="M12 4v10M8 8l4-4 4 4"/><path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+      <span>松开即可载入音乐文件</span>
+    </div>
+  </div>
+
+  <!-- QQ 音乐搜索 -->
+  <aside class="search-panel" id="searchPanel">
+    <div class="search-head">
+      <svg viewBox="0 0 24 24" class="ico"><circle cx="11" cy="11" r="7"/><path d="M20.5 20.5L16 16"/></svg>
+      <input class="search-input" id="searchInput" type="text" placeholder="搜索歌曲 / 歌手 / 专辑" autocomplete="off" spellcheck="false">
+      <button class="icon-btn" id="btnSearchClose" title="收起">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <!-- 登录态：登录后才能在线播放 -->
+    <div class="account" id="account">
+      <span class="account-dot" id="accountDot"></span>
+      <span class="account-text" id="accountText">未登录 · 只能取歌词，不能在线播放</span>
+      <button class="mini-btn" id="btnLogin">登录 QQ 音乐</button>
+    </div>
+    <div class="search-status" id="searchStatus">输入关键词后按回车</div>
+    <div class="search-results" id="searchResults"></div>
+  </aside>
+
+  <!-- 字幕样式面板 -->
+  <aside class="settings" id="settings">
+    <div class="settings-head">
+      <h2>悬浮字幕样式</h2>
+      <button class="icon-btn" id="btnSettingsClose" title="收起">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="settings-body">
+      <div class="row">
+        <span class="label">歌词样式</span>
+        <div class="segmented wide" id="segMode">
+          <button data-mode="scatter">散落</button>
+          <button data-mode="bar">字幕条</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <span class="label">显示悬浮歌词</span>
+        <button class="switch" id="swVisible" data-key="visible"></button>
+      </div>
+
+      <div class="row">
+        <span class="label">歌词色号<em>左键选用 · 右键删除</em></span>
+        <button class="mini-btn" id="btnSaveColor">存为色号</button>
+      </div>
+      <div class="swatches" id="swatches"></div>
+      <div class="row">
+        <span class="label">自定义颜色<em id="valColor">#a98bff</em></span>
+        <input type="color" id="inpColor" value="#a98bff">
+      </div>
+
+      <div class="row slider">
+        <span class="label">字号<em id="valFont">44</em></span>
+        <input type="range" id="rgFont" min="26" max="76" step="2" value="44">
+      </div>
+      <div class="row slider">
+        <span class="label">不透明度<em id="valOpacity">96</em></span>
+        <input type="range" id="rgOpacity" min="40" max="100" step="2" value="96">
+      </div>
+      <div class="row">
+        <span class="label">文字描边阴影</span>
+        <button class="switch" id="swShadow" data-key="textShadow"></button>
+      </div>
+      <div class="row">
+        <span class="label">跟随歌曲自动切色<em>识别到对应曲目时</em></span>
+        <button class="switch" id="swAutoTheme" data-key="autoTheme"></button>
+      </div>
+
+      <!-- 散落模式专属 -->
+      <div class="row note only-scatter">
+        散落模式会铺满整个屏幕，因此已自动开启鼠标穿透，不会挡住你操作电脑。
+      </div>
+      <div class="row slider only-scatter">
+        <span class="label">倾斜角度下限<em id="valAngleMin">3°</em></span>
+        <input type="range" id="rgAngleMin" min="0" max="30" step="1" value="3">
+      </div>
+      <div class="row slider only-scatter">
+        <span class="label">倾斜角度上限<em id="valAngleMax">15°</em></span>
+        <input type="range" id="rgAngleMax" min="0" max="30" step="1" value="15">
+      </div>
+      <div class="row slider only-scatter">
+        <span class="label">同时显示<em id="valLines">4 句</em></span>
+        <input type="range" id="rgLines" min="1" max="8" step="1" value="4">
+      </div>
+      <div class="row slider only-scatter">
+        <span class="label">停留时长<em id="valLife">9 秒</em></span>
+        <input type="range" id="rgLife" min="3" max="20" step="1" value="9">
+      </div>
+      <div class="row only-scatter">
+        <span class="label">字号随机<em>错落感</em></span>
+        <button class="switch" id="swJitter" data-key="scatterJitter"></button>
+      </div>
+      <div class="row only-scatter">
+        <span class="label">微微颤抖<em>游戏内观感</em></span>
+        <button class="switch" id="swTremble" data-key="tremble"></button>
+      </div>
+
+      <!-- 字幕条模式专属 -->
+      <div class="row only-bar">
+        <span class="label">锁定（鼠标穿透）<em>Ctrl + Alt + L</em></span>
+        <button class="switch" id="swLocked" data-key="locked"></button>
+      </div>
+      <div class="row only-bar">
+        <span class="label">显示上一行</span>
+        <button class="switch" id="swPrev" data-key="showPrev"></button>
+      </div>
+      <div class="row only-bar">
+        <span class="label">显示下一行</span>
+        <button class="switch" id="swNext" data-key="showNext"></button>
+      </div>
+      <div class="row only-bar">
+        <span class="label">暗色底衬</span>
+        <button class="switch" id="swBackdrop" data-key="backdrop"></button>
+      </div>
+      <div class="row slider only-bar">
+        <span class="label">窗口宽度<em id="valWidth">1040</em></span>
+        <input type="range" id="rgWidth" min="520" max="1600" step="20" value="1040">
+      </div>
+      <div class="row only-bar">
+        <span class="label">对齐</span>
+        <div class="segmented" id="segAlign">
+          <button data-align="left">左</button>
+          <button data-align="center" class="on">中</button>
+          <button data-align="right">右</button>
+        </div>
+      </div>
+
+      <button class="wide-btn only-bar" id="btnResetPos">重置悬浮歌词位置</button>
+    </div>
+  </aside>
+
+  <script src="../../shared/lyric-parser.js"></script>
+  <script src="../../shared/color-util.js"></script>
+  <script src="../../shared/theme-rules.js"></script>
+  <script src="../../shared/demo-data.js"></script>
+  <script src="player.js"></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "name": "mili-player",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mili 播放器 —— 以悬浮字幕形式在桌面显示歌词的音乐播放器",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "node scripts/start.js",
+    "dev": "node scripts/start.js --dev",
+    "test": "node scripts/start.js scripts/test-regressions.js",
+    "test:audio": "node scripts/start.js scripts/test-audio.js",
+    "test:qq": "node scripts/test-qqmusic.js",
+    "test:qrc": "node scripts/verify-qrc-des.js",
+    "test:login": "node scripts/start.js scripts/test-login.js",
+    "test:online": "node scripts/start.js scripts/test-online.js",
+    "test:presets": "node scripts/test-presets.js",
+    "test:theme": "node scripts/test-theme.js",
+    "testdata": "python scripts/make-testdata.py",
+    "shot": "node scripts/start.js scripts/screenshot.js",
+    "setup:electron": "powershell -ExecutionPolicy Bypass -File scripts/install-electron.ps1",
+    "package": "npm run package:raw && node scripts/make-dist-launchers.js",
+    "package:raw": "node node_modules/@electron/packager/bin/electron-packager.mjs . \"Mili播放器\" --platform=win32 --arch=x64 --electron-version=33.2.1 --electron-zip-dir=.electron-cache --out=dist --overwrite --asar --ignore=\"^/(dist|shots|testdata|data|scripts|README\\.md|\\.reference|\\.npm-cache|\\.electron-cache|\\.gitignore|\\.npmrc)\""
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^33.2.1"
+  }
+}
