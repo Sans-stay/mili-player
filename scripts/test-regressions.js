@@ -75,6 +75,8 @@ ipcMain.handle('overlay:update-settings', (_e, patch) => {
 
 /* 渲染进程启动时会问登录态，这里回「未登录」即可 */
 ipcMain.handle('qq:session', () => ({ loggedIn: false, uin: '', hasKey: false }));
+/* 搜索结果回空列表：正好模拟「换到一首匹配不到歌词的歌」 */
+ipcMain.handle('qq:search', () => ({ ok: true, songs: [] }));
 ipcMain.handle('qq:login', () => ({ ok: false, canceled: true, error: '测试宿主未接入登录' }));
 ipcMain.handle('qq:logout', () => ({ loggedIn: false, uin: '', hasKey: false }));
 ipcMain.handle('qq:playurl', (_e, song) => ({ ok: false, needLogin: true, error: '需要先登录 QQ 音乐', mid: song.mid }));
@@ -316,6 +318,132 @@ async function testColorPresetRename() {
   await playerWin.webContents.executeJavaScript(`document.getElementById('btnSettingsClose').click();`);
 }
 
+/**
+ * 找不到歌词时，主窗口的歌词区不能是一片空白。
+ * 悬浮窗一直有空状态（「暂无歌词」），主窗口以前什么都没有 —— 这个用例把它钉住。
+ */
+async function testEmptyLyricsPlaceholder() {
+  const probe = (kind, text) => playerWin.webContents.executeJavaScript(`
+    (function () {
+      setLyrics([], 0);
+      setLyricsPlaceholder(${JSON.stringify(kind)}, ${JSON.stringify(text)});
+      var el = document.querySelector('.lyrics-empty');
+      return {
+        exists: Boolean(el),
+        loading: Boolean(el && el.classList.contains('loading')),
+        title: el ? el.querySelector('.le-title').textContent : '',
+        sub: el ? el.querySelector('.le-sub').textContent : '',
+        button: el && el.querySelector('.le-btn') ? el.querySelector('.le-btn').textContent : '',
+      };
+    })()
+  `);
+
+  const none = await probe('none', '测试文案');
+  results.push({
+    name: 'F1. 找不到歌词时显示空状态，而不是一片空白',
+    ok: none.exists && none.title === '暂无歌词' && none.sub === '测试文案' && Boolean(none.button),
+    detail: none.exists
+      ? `「${none.title}」/「${none.sub}」/按钮「${none.button}」`
+      : '歌词区里没有渲染出任何空状态元素',
+  });
+
+  const loading = await probe('loading', '');
+  results.push({
+    name: 'F2. 匹配中显示进度态，且不给按钮',
+    ok: loading.exists && loading.loading && loading.title === '正在匹配歌词…' && !loading.button,
+    detail: loading.exists
+      ? `「${loading.title}」loading=${loading.loading} 按钮=${loading.button || '无'}`
+      : '没渲染出空状态',
+  });
+
+  const restored = await playerWin.webContents.executeJavaScript(`
+    (function () {
+      setLyrics([
+        { time: 0, text: '恢复的一句歌词', words: [{ text: '恢复的一句歌词', time: 0, dur: 2 }] },
+      ], 30);
+      return {
+        placeholder: Boolean(document.querySelector('.lyrics-empty')),
+        lines: document.querySelectorAll('.lyrics-inner .line').length,
+      };
+    })()
+  `);
+  results.push({
+    name: 'F3. 重新拿到歌词后空状态自动收起',
+    ok: !restored.placeholder && restored.lines === 1,
+    detail: `空状态残留=${restored.placeholder}，歌词行数=${restored.lines}`,
+  });
+
+  // 空状态必须关掉上下渐隐遮罩，否则按钮会被切得发虚
+  const mask = await playerWin.webContents.executeJavaScript(`
+    (function () {
+      setLyrics([], 0);
+      setLyricsPlaceholder('none', '');
+      var withEmpty = getComputedStyle(document.querySelector('.lyrics')).maskImage;
+      setLyrics([{ time: 0, text: '有歌词', words: [{ text: '有歌词', time: 0, dur: 2 }] }], 30);
+      var withLines = getComputedStyle(document.querySelector('.lyrics')).maskImage;
+      return { withEmpty: withEmpty, withLines: withLines };
+    })()
+  `);
+  results.push({
+    name: 'F4. 空状态关掉渐隐遮罩，有歌词时恢复',
+    ok: mask.withEmpty === 'none' && mask.withLines !== 'none',
+    detail: `空状态 mask=${mask.withEmpty}；有歌词 mask=${String(mask.withLines).slice(0, 40)}…`,
+  });
+}
+
+/**
+ * 换到一首「没有歌词」的歌时，悬浮窗必须把上一首的字幕清掉。
+ *
+ * 曾经的 bug：publish() 只在歌词匹配成功那条分支里调用，匹配失败时直接 return，
+ * 主进程根本不知道歌词已经空了，于是悬浮窗一直挂着上一首歌的字幕。
+ *
+ * 这里**走真实的换歌路径**（塞一首假音频进队列后调 playQueueIndex），
+ * 而不是手工 publish() —— 否则把 playQueueIndex 里那句 await publish() 删掉，
+ * 用例仍然是绿的，等于没测到。
+ */
+async function testOverlayClearsWhenLyricsGone() {
+  // 先让悬浮窗上真的有字幕
+  await playerWin.webContents.executeJavaScript(`
+    (async () => {
+      seek(0);
+      setLyrics([
+        { time: 0, text: '上一首的第一句', words: [{ text: '上一首的第一句', time: 0, dur: 30 }] },
+        { time: 30, text: '上一首的第二句', words: [{ text: '上一首的第二句', time: 30, dur: 30 }] },
+      ], 90);
+      await publish();
+    })()
+  `);
+  await sleep(2500);
+  const before = await snapshotItems();
+
+  // 真实换歌：队列里塞一首匹配不到歌词的假音频
+  await playerWin.webContents.executeJavaScript(`
+    (function () {
+      player.queue = [{
+        path: 'C:/mili-test/没有歌词的歌.mp3',
+        url: 'file:///C:/mili-test/no-lyrics.mp3',
+        title: '没有歌词的歌',
+        artist: '佚名',
+        name: 'no-lyrics',
+      }];
+      playQueueIndex(0);          // 故意不 await，它就是后台跑的
+      return true;
+    })()
+  `);
+  await sleep(2000);              // 等 IPC 往返 + removeItem 的 1 秒淡出
+
+  const after = await snapshotItems();
+  const publishedLines = state.lines.length;
+
+  results.push({
+    name: 'G. 换到没有歌词的歌时，悬浮窗不留上一首的字幕',
+    ok: before.length > 0 && after.length === 0 && publishedLines === 0,
+    detail: `切换前 ${before.length} 句 -> 切换后 ${after.length} 句；` +
+      `主进程收到的歌词条数=${publishedLines}` +
+      (after.length ? `（残留：${after.map((v) => v.text).join(' / ')}）` : ''),
+  });
+}
+
 async function run() {
   const { workArea } = screen.getPrimaryDisplay();
 
@@ -363,6 +491,8 @@ async function run() {
   await testAngleRange();
   await testColorPresetRename();
   await testLyricsChangeStillRebuilds();
+  await testEmptyLyricsPlaceholder();
+  await testOverlayClearsWhenLyricsGone();
 
   console.log('\n================ 回归测试结果 ================');
   for (const r of results) {

@@ -483,6 +483,11 @@ function loop() {
     const index = findLineIndex(view.lines, position);
     if (isScatter()) updateScatter(index, position, jumped);
     else setIndex(index, position);
+  } else if (view.items.length) {
+    // 没有歌词时把残留的字幕清掉。
+    // 正常路径上 onState 里那句 clearScatter() 已经处理了，这里是兜底 ——
+    // 万一漏掉一次状态广播，也不该让上一首歌的字幕永远挂在屏幕上。
+    clearScatter();
   }
 
   requestAnimationFrame(loop);
