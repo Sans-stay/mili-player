@@ -102,6 +102,23 @@ ipcMain.handle('qq:login', () => ({ ok: false, canceled: true, error: '截图宿
 ipcMain.handle('qq:logout', () => ({ loggedIn: false, uin: '', hasKey: false }));
 ipcMain.handle('qq:playurl', async (_e, song) => ({ ...(await qqmusic.getSongUrl(song.mid)), mid: song.mid }));
 
+/* 歌单样例：截图时列表里有东西可看（混合本地与在线） */
+ipcMain.handle('playlist:load', () => ({
+  playMode: process.argv.includes('--shuffle') ? 'shuffle' : 'list',
+  items: [
+    { id: 'qq:001', kind: 'qq', mid: '001', title: '晴 天', artist: '周杰伦', album: '叶惠美', duration: 269, cover: state.track ? state.track.cover : '' },
+    { id: 'local:002', kind: 'local', path: 'D:/music/002.mp3', url: 'file:///D:/music/002.mp3', title: '夜曲', artist: '周杰伦', album: '十一月的萧邦', duration: 227 },
+    { id: 'qq:003', kind: 'qq', mid: '003', title: 'TIAN TIAN', artist: 'Mili', album: 'TIAN TIAN', duration: 214 },
+    { id: 'local:004', kind: 'local', path: 'D:/music/004.flac', url: 'file:///D:/music/004.flac', title: 'SAIKAI', artist: 'Mili', album: 'SAIKAI', duration: 198 },
+    { id: 'qq:005', kind: 'qq', mid: '005', title: 'Fly, My Wings', artist: 'Mili', album: 'Fly, My Wings', duration: 245 },
+    { id: 'local:006', kind: 'local', path: 'D:/music/006.mp3', url: 'file:///D:/music/006.mp3', title: 'Through Patches of Violet', artist: 'Mili', album: '', duration: 233 },
+  ],
+}));
+ipcMain.handle('playlist:save', () => ({ ok: true }));
+ipcMain.handle('audio:pickFolder', () => ({ ok: true, files: [], truncated: false }));
+ipcMain.handle('audio:covers', (_e, paths) => (paths || []).map((p) => ({ path: p, cover: '' })));
+ipcMain.handle('qq:checkPlayable', () => ({ ok: true, mid: '001', quality: '320kbps' }));
+
 const run = (js) => playerWin.webContents.executeJavaScript(js);
 
 async function shoot() {
@@ -212,10 +229,24 @@ async function shoot() {
   const overlayShot = await overlayWin.webContents.capturePage();
   fs.writeFileSync(path.join(OUT, 'overlay.png'), overlayShot.toPNG());
 
+  // 歌单面板：先关掉样式面板，勾两首让「已选」也出现在截图里
+  playerWin.webContents.send('mili:command', { type: 'panel', open: false });
+  await sleep(500);
+  await playerWin.webContents.executeJavaScript(`
+    document.getElementById('btnPlaylist').click();
+    playlist.selected.add('qq:003');
+    playlist.selected.add('local:004');
+    renderPlaylist();
+  `);
+  await sleep(700);
+  const plShot = await playerWin.webContents.capturePage();
+  fs.writeFileSync(path.join(OUT, 'playlist.png'), plShot.toPNG());
+
   console.log('已保存：', path.join(OUT, 'player.png'));
   console.log('已保存：', path.join(OUT, 'player-empty-lyrics.png'));
   console.log('已保存：', path.join(OUT, 'player-settings.png'));
   console.log('已保存：', path.join(OUT, 'overlay.png'));
+  console.log('已保存：', path.join(OUT, 'playlist.png'));
   app.quit();
 }
 

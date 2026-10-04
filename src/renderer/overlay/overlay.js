@@ -66,6 +66,15 @@ function nowPosition() {
   return position + (Date.now() - stamp) / 1000;
 }
 
+/*
+ * 歌词用的时间轴 = 播放时间 − 歌词延迟。
+ * 正数把歌词往后推（歌词出现得比声音早时调大）。
+ * 主窗口那边有一份一模一样的实现，改这里记得同步。
+ */
+function lyricTime(position) {
+  return position - (Number(view.settings.lyricOffset) || 0);
+}
+
 /** 设置 */
 function applySettings(settings) {
   const prev = view.settings;
@@ -480,9 +489,15 @@ function loop() {
   view.lastPos = position;
 
   if (view.lines.length) {
-    const index = findLineIndex(view.lines, position);
-    if (isScatter()) updateScatter(index, position, jumped);
-    else setIndex(index, position);
+    /*
+     * 歌词一律按「播放时间 − 歌词延迟」来算。
+     * 句子切换（findLineIndex）和逐字高亮（updateScatter/setIndex）必须用同一条
+     * 时间轴，否则会出现「句子对上了、字还差一截」这种半对齐的怪现象。
+     */
+    const t = lyricTime(position);
+    const index = findLineIndex(view.lines, t);
+    if (isScatter()) updateScatter(index, t, jumped);
+    else setIndex(index, t);
   } else if (view.items.length) {
     // 没有歌词时把残留的字幕清掉。
     // 正常路径上 onState 里那句 clearScatter() 已经处理了，这里是兜底 ——
@@ -528,9 +543,10 @@ async function init() {
   const position = nowPosition();
   view.lastPos = position;
   if (view.lines.length) {
-    const index = findLineIndex(view.lines, position);
-    if (isScatter()) updateScatter(index, position, true);
-    else setIndex(index, position);
+    const t = lyricTime(position);
+    const index = findLineIndex(view.lines, t);
+    if (isScatter()) updateScatter(index, t, true);
+    else setIndex(index, t);
   }
 
   api.onState((payload) => {
@@ -548,7 +564,7 @@ async function init() {
     if (linesChanged) {
       clearScatter();
       view.index = -1;
-      const pos = nowPosition();
+      const pos = lyricTime(nowPosition());
       if (view.lines.length) {
         const idx = findLineIndex(view.lines, pos);
         if (isScatter()) updateScatter(idx, pos, true);
@@ -562,7 +578,7 @@ async function init() {
   api.onSync((payload) => {
     view.sync = payload;
     if (!view.lines.length) return;
-    const pos = nowPosition();
+    const pos = lyricTime(nowPosition());
     const idx = findLineIndex(view.lines, pos);
     if (isScatter()) updateScatter(idx, pos, false);
     else setIndex(idx, pos);

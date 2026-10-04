@@ -10,11 +10,18 @@ contextBridge.exposeInMainWorld('mili', {
 
   // 本地音频
   pickAudioFiles: () => ipcRenderer.invoke('audio:pick'),
+  pickAudioFolder: () => ipcRenderer.invoke('audio:pickFolder'),
   describeAudioFiles: (paths) => ipcRenderer.invoke('audio:describe', paths),
+  // 只回封面：歌单文件里不存本地封面，启动后按需回填
+  audioCovers: (paths) => ipcRenderer.invoke('audio:covers', paths),
   // 拖拽进来的 File 对象要靠它拿到真实路径（Electron 32+ 已移除 file.path）
   pathForFile: (file) => {
     try { return webUtils.getPathForFile(file); } catch { return ''; }
   },
+
+  // 播放列表（持久化在 data/playlist.json）
+  loadPlaylist: () => ipcRenderer.invoke('playlist:load'),
+  savePlaylist: (payload) => ipcRenderer.invoke('playlist:save', payload),
 
   setOverlayVisible: (visible) => ipcRenderer.invoke('overlay:set-visible', visible),
   setOverlayLocked: (locked) => ipcRenderer.invoke('overlay:set-locked', locked),
@@ -32,6 +39,8 @@ contextBridge.exposeInMainWorld('mili', {
   qqLogin: () => ipcRenderer.invoke('qq:login'),
   qqLogout: () => ipcRenderer.invoke('qq:logout'),
   qqPlayUrl: (song) => ipcRenderer.invoke('qq:playurl', song),
+  // 加入歌单前先确认这首歌真能播（没版权/需要 VIP 的就不进歌单）
+  qqCheckPlayable: (song) => ipcRenderer.invoke('qq:checkPlayable', song),
 
   onState: (callback) => {
     const handler = (_event, payload) => callback(payload);

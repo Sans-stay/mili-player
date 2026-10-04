@@ -30,6 +30,13 @@
       <button class="icon-btn" id="btnSearch" title="搜索 QQ 音乐">
         <svg viewBox="0 0 24 24" class="ico"><circle cx="11" cy="11" r="7"/><path d="M20.5 20.5L16 16"/></svg>
       </button>
+      <button class="icon-btn" id="btnPlaylist" title="播放列表">
+        <svg viewBox="0 0 24 24" class="ico">
+          <path d="M4 6h10M4 11h10M4 16h6"/>
+          <circle cx="17.5" cy="16.5" r="2.8"/>
+          <path d="M20.3 16.5V6.6l-3.2 1"/>
+        </svg>
+      </button>
       <button class="icon-btn" id="btnSettings" title="字幕样式">
         <svg viewBox="0 0 24 24" class="ico">
           <circle cx="12" cy="12" r="3"/>
@@ -139,6 +146,43 @@
     <div class="search-results" id="searchResults"></div>
   </aside>
 
+  <!-- 播放列表 -->
+  <aside class="playlist-panel" id="playlistPanel">
+    <div class="settings-head">
+      <h2>播放列表</h2>
+      <button class="icon-btn" id="btnPlaylistClose" title="收起">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="pl-modes">
+      <div class="segmented wide" id="segPlayMode">
+        <button type="button" data-mode="order" title="顺序播放：放完整个列表就停">顺序</button>
+        <button type="button" data-mode="list" title="列表循环：放完回到第一首">列表</button>
+        <button type="button" data-mode="single" title="单曲循环：当前这首反复播放">单曲</button>
+        <button type="button" data-mode="shuffle" title="随机播放：洗牌袋，一轮之内不重复">随机</button>
+      </div>
+    </div>
+
+    <div class="pl-toolbar">
+      <label class="pl-all">
+        <input type="checkbox" id="plSelectAll">
+        <span>全选</span>
+      </label>
+      <span class="pl-count" id="plCount">歌单是空的</span>
+      <button class="mini-btn" id="plPlaySelected">播放选中</button>
+    </div>
+
+    <div class="pl-list" id="plList"></div>
+
+    <div class="pl-footer">
+      <button class="mini-btn" id="plAddFiles">添加文件</button>
+      <button class="mini-btn" id="plAddFolder">添加文件夹</button>
+      <button class="mini-btn" id="plRemove">移除选中</button>
+      <button class="mini-btn" id="plClear">清空</button>
+    </div>
+  </aside>
+
   <!-- 字幕样式面板 -->
   <aside class="settings" id="settings">
     <div class="settings-head">
@@ -179,6 +223,15 @@
       <div class="row slider">
         <span class="label">不透明度<em id="valOpacity">96</em></span>
         <input type="range" id="rgOpacity" min="40" max="100" step="2" value="96">
+      </div>
+
+      <div class="row slider">
+        <span class="label">歌词延迟<em id="valOffset">0.0 秒</em></span>
+        <input type="range" id="rgOffset" min="-5" max="5" step="0.1" value="0">
+      </div>
+      <div class="row">
+        <span class="label">歌词比声音早就往右拉<em>双击滑杆归零</em></span>
+        <button class="mini-btn" id="btnOffsetReset">归零</button>
       </div>
       <div class="row">
         <span class="label">文字描边阴影</span>

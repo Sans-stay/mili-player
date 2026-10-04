@@ -31,8 +31,7 @@ const player = {
   // 演示模式的进度锚点：position = anchorPos + (Date.now() - anchorWall) / 1000
   anchorPos: 0,
   anchorWall: 0,
-  // 播放列表
-  queue: [],
+  // 播放进度（歌单本身见下面的 playlist 对象）
   queueIndex: -1,
 };
 
@@ -43,6 +42,14 @@ const lyricDom = { lines: [], words: [] };
 
 const hasAudio = () => Boolean(audioUrl);
 const isLocalAudio = () => audioKind === 'local';
+
+/*
+ * 歌词用的时间轴 = 播放时间 − 歌词延迟。
+ * 「句子切到哪一句」和「字亮到哪一个」都走这里，两条时间轴才一致，
+ * 不会出现句子对齐了、逐字高亮还偏着的情况。
+ * 正数 = 歌词往后推（歌词出现得比声音早时调大）。
+ */
+const lyricTime = (position) => position - (Number(settingsCache.lyricOffset) || 0);
 
 /* --------------------------------------------------------------- 小工具 */
 
@@ -114,9 +121,9 @@ function seek(seconds) {
   }
   player.position = target;
   anchorNow();
-  const index = findLineIndex(player.lines, player.position);
+  const index = findLineIndex(player.lines, lyricTime(player.position));
   setActiveLine(index);
-  updateWords(index, player.position);
+  updateWords(index, lyricTime(player.position));
   renderProgress();
   pushSync();
 }
@@ -127,19 +134,335 @@ function pushSync() {
 
 /* --------------------------------------------------------- 播放列表 */
 
+/*
+ * 歌单是播放的唯一来源：本地文件和 QQ 音乐曲目混在同一个列表里，
+ * player.queueIndex 指向 playlist.items 里的当前项。
+ *
+ * 「顺序 / 随机」只影响 nextTrack 怎么挑下一首，**不重排 items 本身** ——
+ * 这样切模式时不会打断正在播的歌。随机模式下「上一首」靠 history 回退。
+ */
+const playlist = {
+  items: [],
+  /*
+   * 播放模式四态，和 QQ 音乐那类播放器一致：
+   *   order   顺序播放   —— 放完整个列表就停
+   *   list    列表循环   —— 放完回到第一首
+   *   single  单曲循环   —— 当前这首反复放
+   *   shuffle 随机播放   —— 洗牌袋，一轮之内不重复
+   * 主界面的循环按钮和歌单面板里的分段控件改的是同一个值，所以两边永远同步。
+   */
+  playMode: 'list',
+  history: [],            // 随机模式下来时的路，供「上一首」用（存 id，删除后不会错位）
+  bag: [],                // 随机模式下本轮**还没播到**的 id（已打乱）—— 见 refillBag
+  selected: new Set(),    // 勾选中的 id，用于批量增删
+};
+
+const isShuffle = () => playlist.playMode === 'shuffle';
+const isSingleLoop = () => playlist.playMode === 'single';
+
+const PLAY_MODE_LABEL = {
+  order: '顺序播放',
+  list: '列表循环',
+  single: '单曲循环',
+  shuffle: '随机播放',
+};
+const PLAY_MODE_ORDER = ['order', 'list', 'single', 'shuffle'];
+
+/* 主界面循环按钮的图标：顺序是「一路向前」，其余三种沿用原来的图标 */
+const LOOP_ICONS = {
+  order: '<path d="M4 12h11"/><path d="M11 7.5l4.5 4.5-4.5 4.5"/>',
+  list: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/>'
+    + '<path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/>',
+  single: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/>'
+    + '<path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/>'
+    + '<path d="M11.2 10.6l1.5-.9V15"/>',
+  shuffle: '<path d="M16 3h5v5"/><path d="M4 20L21 4"/><path d="M21 16v5h-5"/>'
+    + '<path d="M15 15l6 6"/><path d="M4 4l5 5"/>',
+};
+
+/** 把当前播放模式反映到两处 UI（歌单面板的分段控件 + 主界面循环按钮） */
+function applyPlayModeUI() {
+  document.querySelectorAll('#segPlayMode button').forEach((btn) => {
+    btn.classList.toggle('on', btn.dataset.mode === playlist.playMode);
+  });
+
+  const icon = $('loopIcon');
+  const btn = $('btnLoop');
+  if (icon) icon.innerHTML = LOOP_ICONS[playlist.playMode];
+  if (btn) {
+    btn.title = `播放模式：${PLAY_MODE_LABEL[playlist.playMode]}（点击切换）`;
+    btn.classList.toggle('active', playlist.playMode !== 'order');
+  }
+}
+
+/**
+ * 切换播放模式。歌单面板和主界面循环按钮都走这里 ——
+ * 两边各自记一份状态的话，迟早会出现「按钮显示随机、实际在顺序放」这种事。
+ */
+function setPlayMode(mode, options) {
+  if (!PLAY_MODE_LABEL[mode]) return;
+
+  const opts = options || {};
+  const changed = playlist.playMode !== mode;
+  playlist.playMode = mode;
+
+  if (isShuffle()) {
+    playlist.history = [];
+    playlist.bag = [];
+    refillBag();                     // 切进随机就重新洗一轮
+  }
+
+  audio.loop = isSingleLoop();        // 单曲循环交给 <audio> 原生 loop，衔接无缝
+  applyPlayModeUI();
+
+  if (changed) {
+    savePlaylistSoon();
+    if (!opts.quiet) toast(`已切换为${PLAY_MODE_LABEL[mode]}`);
+  }
+}
+
+/** 原地洗牌（Fisher-Yates） */
+function shuffleInPlace(list) {
+  for (let i = list.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [list[i], list[j]] = [list[j], list[i]];
+  }
+  return list;
+}
+
+/**
+ * 随机播放用的是「洗牌袋」而不是「每次随机挑一首」。
+ * ---------------------------------------------------------------
+ * 每次随机挑的话，两首前刚放过的歌很可能马上又来 —— 用户会觉得「随机得不对」。
+ * 改成：把整个歌单打乱成一袋，按顺序掏，掏空了才重新洗牌。
+ * 这样**一轮之内绝不重复**，连续的 N 首刚好是整张歌单的一个排列。
+ */
+function refillBag() {
+  const ids = playlist.items.map((it) => it.id);
+  if (!ids.length) { playlist.bag = []; return; }
+
+  shuffleInPlace(ids);
+
+  // 新一轮的第一首不能是刚播完的那首，否则两轮交界处会连着听两遍同一首
+  const lastId = currentItem() ? currentItem().id : null;
+  if (lastId && ids.length > 1) {
+    for (let attempt = 0; attempt < 20 && ids[0] === lastId; attempt += 1) shuffleInPlace(ids);
+    if (ids[0] === lastId) [ids[0], ids[1]] = [ids[1], ids[0]];   // 兜底，别死循环
+  }
+
+  playlist.bag = ids;
+  console.log(`[mili] 随机袋重新装满：${ids.length} 首`);
+}
+
+/** 从袋子里掏下一首，返回它在 items 里的下标 */
+function nextFromBag() {
+  // 已经从歌单里删掉的 id 顺手清出去 —— 存 id 而不是下标，就是为了删除后不会错位
+  const alive = new Set(playlist.items.map((it) => it.id));
+  playlist.bag = playlist.bag.filter((id) => alive.has(id));
+
+  if (!playlist.bag.length) refillBag();
+  if (!playlist.bag.length) return -1;
+
+  const id = playlist.bag.shift();
+  return playlist.items.findIndex((it) => it.id === id);
+}
+
+let playlistSaveTimer = null;
+
+/*
+ * 只有**成功读到过**歌单，才允许往回写。
+ * 否则一旦读取失败（文件正被占、磁盘抽风），内存里就是个空列表，
+ * 下一次保存会把磁盘上真实存在的歌单彻底覆盖掉 —— 这是不可逆的。
+ */
+let playlistLoaded = false;
+
+/** 存盘做了防抖 —— 拖一批文件进来会连着触发很多次 */
+function savePlaylistSoon() {
+  if (!playlistLoaded) {
+    console.warn('[mili] 歌单未成功载入，跳过保存以免覆盖磁盘上的数据');
+    return;
+  }
+
+  clearTimeout(playlistSaveTimer);
+  playlistSaveTimer = setTimeout(() => {
+    /*
+     * 本地文件的封面**不落盘**。
+     * 内嵌封面动辄上百 KB 的 base64，几十首就能把 playlist.json 撑到几 MB
+     * （实测 26 首 = 2.9 MB，其中 2.87 MB 是封面），每次改歌单都要 stringify 一遍。
+     * 内存里留着照常显示，重启后由 hydrateLocalCovers() 补回来。
+     */
+    const items = playlist.items.map((it) => (it.kind === 'local' && it.cover
+      ? { ...it, cover: '' }
+      : it));
+
+    window.mili.savePlaylist({ playMode: playlist.playMode, items })
+      .catch((err) => console.warn('[mili] 保存歌单失败：', err.message));
+  }, 400);
+}
+
+/** 启动后把本地文件的封面补回来（分批，别一次性卡住界面） */
+async function hydrateLocalCovers() {
+  const missing = playlist.items.filter((it) => it.kind === 'local' && it.path && !it.cover);
+  if (!missing.length) return;
+
+  const CHUNK = 30;
+  let filled = 0;
+
+  for (let i = 0; i < missing.length; i += CHUNK) {
+    const batch = missing.slice(i, i + CHUNK);
+    let results = [];
+    try {
+      results = await window.mili.audioCovers(batch.map((it) => it.path));
+    } catch (err) {
+      console.warn('[mili] 读取封面失败：', err.message);
+      return;
+    }
+
+    const byPath = new Map(results.map((r) => [r.path, r.cover]));
+    for (const item of originalItemsById(batch)) {
+      const cover = byPath.get(item.path);
+      if (cover) { item.cover = cover; filled += 1; }
+    }
+  }
+
+  if (filled) {
+    console.log(`[mili] 已补回 ${filled} 个本地封面`);
+    renderPlaylist();
+  }
+}
+
+/** 封面回填时要改的是 playlist.items 里那一份真身，而不是副本 */
+function originalItemsById(batch) {
+  const ids = new Set(batch.map((it) => it.id));
+  return playlist.items.filter((it) => ids.has(it.id));
+}
+
+/** 本地文件（audio:describe 的结果）-> 歌单项 */
+function localToItem(meta) {
+  return {
+    id: `local:${meta.path}`,
+    kind: 'local',
+    path: meta.path,
+    url: meta.url,
+    title: meta.title || meta.name || '未知曲目',
+    artist: meta.artist || '',
+    album: meta.album || '',
+    cover: meta.cover || '',
+    duration: Number(meta.duration) || 0,
+  };
+}
+
+/** QQ 音乐搜索结果 -> 歌单项 */
+function qqToItem(song) {
+  return {
+    id: `qq:${song.mid}`,
+    kind: 'qq',
+    mid: song.mid,
+    songMid: song.songMid || song.mid,
+    title: song.title || '未知曲目',
+    artist: song.artist || '',
+    album: song.album || '',
+    cover: song.cover || '',
+    duration: Number(song.duration) || 0,
+  };
+}
+
+const currentItem = () => (player.queueIndex >= 0 && player.queueIndex < playlist.items.length
+  ? playlist.items[player.queueIndex]
+  : null);
+
+/** 追加进歌单，自动跳过已经在里面的。返回真正加进去的条数 */
+function addPlaylistItems(items) {
+  const existing = new Set(playlist.items.map((it) => it.id));
+  let added = 0;
+  const fresh = [];
+
+  for (const item of items) {
+    if (!item || !item.id || existing.has(item.id)) continue;
+    existing.add(item.id);
+    playlist.items.push(item);
+    fresh.push(item);
+    added += 1;
+  }
+
+  if (added) {
+    // 新加的也丢进随机袋，这样随机模式下马上就可能轮到它们
+    if (isShuffle()) playlist.bag.push(...fresh.map((it) => it.id));
+    renderPlaylist();
+    savePlaylistSoon();
+  }
+  return added;
+}
+
+/** 按 id 批量移除。正在播的那首没了就停下来 */
+function removePlaylistItems(ids) {
+  const doomed = new Set(ids);
+  if (!doomed.size) return 0;
+
+  const playingId = currentItem() ? currentItem().id : null;
+  const before = playlist.items.length;
+  playlist.items = playlist.items.filter((it) => !doomed.has(it.id));
+  const removed = before - playlist.items.length;
+
+  if (playingId && doomed.has(playingId)) {
+    stopAudio();
+    player.queueIndex = -1;
+    player.playing = false;
+    document.body.classList.remove('playing');
+    setPlayIcon(false);
+    pushSync();
+  } else if (playingId) {
+    player.queueIndex = playlist.items.findIndex((it) => it.id === playingId);
+  }
+
+  for (const id of doomed) playlist.selected.delete(id);
+  playlist.history = playlist.history.filter((id) => !doomed.has(id));
+
+  renderPlaylist();
+  savePlaylistSoon();
+  return removed;
+}
+
+/** 按当前模式算出「上一首 / 下一首」在 items 里的下标 */
+function stepIndex(direction) {
+  const n = playlist.items.length;
+  if (!n) return -1;
+
+  if (isShuffle()) {
+    // 上一首：沿实际播放过的轨迹回退，而不是随机跳
+    if (direction < 0) {
+      if (playlist.history.length) {
+        const id = playlist.history.pop();
+        const at = playlist.items.findIndex((it) => it.id === id);
+        if (at >= 0) return at;
+      }
+      if (n === 1) return 0;
+      let pick = player.queueIndex;
+      while (pick === player.queueIndex) pick = Math.floor(Math.random() * n);
+      return pick;
+    }
+    return nextFromBag();
+  }
+
+  const from = player.queueIndex < 0 ? (direction > 0 ? -1 : 0) : player.queueIndex;
+  return (from + direction + n) % n;
+}
+
+/** 记下随机模式的来路，供「上一首」回退 */
+function rememberHistory(fromIndex, toIndex) {
+  if (!isShuffle() || fromIndex < 0 || fromIndex === toIndex) return;
+  const prev = playlist.items[fromIndex];
+  if (prev) playlist.history.push(prev.id);
+}
+
 function prevTrack() {
-  if (player.queue.length > 1 && player.queueIndex > 0) { playQueueIndex(player.queueIndex - 1); return; }
-  if (player.queue.length) { playQueueIndex(player.queueIndex); return; }
-  seek(0);
+  if (!playlist.items.length) { seek(0); return; }
+  playIndex(stepIndex(-1));
 }
 
 function nextTrack() {
-  if (player.queue.length > 1 && player.queueIndex + 1 < player.queue.length) {
-    playQueueIndex(player.queueIndex + 1);
-    return;
-  }
-  if (player.queue.length) { playQueueIndex(0); return; }
-  seek(0);
+  if (!playlist.items.length) { seek(0); return; }
+  playIndex(stepIndex(1));
 }
 
 function stopAudio() {
@@ -150,15 +473,32 @@ function stopAudio() {
   audioKind = '';
 }
 
-/** 播放列表里的第 index 首 */
-async function playQueueIndex(index) {
-  if (index < 0 || index >= player.queue.length) return;
-  const meta = player.queue[index];
+/** 播歌单里的第 index 首，本地 / 在线自动分流 */
+async function playIndex(index) {
+  const item = playlist.items[index];
+  if (!item) return;
+
+  rememberHistory(player.queueIndex, index);
   player.queueIndex = index;
 
-  audioUrl = meta.url;
+  // 手动点播的那首也算「这一轮已经听过」，从袋子里拿走，免得同一轮里又轮到它
+  if (isShuffle()) {
+    playlist.bag = playlist.bag.filter((id) => id !== item.id);
+  }
+
+  renderPlaylist();
+
+  if (item.kind === 'local') await playLocalItem(item, index);
+  else await playQQItem(item, index);
+
+  renderPlaylist();
+}
+
+/** 本地文件：直接喂给 <audio>，再后台去匹配歌词 */
+async function playLocalItem(item, index) {
+  audioUrl = item.url;
   audioKind = 'local';
-  audio.src = meta.url;
+  audio.src = item.url;
   audio.volume = player.muted ? 0 : player.volume;
   audio.muted = player.muted;
 
@@ -167,12 +507,12 @@ async function playQueueIndex(index) {
   anchorNow();
 
   player.track = {
-    id: meta.path,
+    id: item.path,
     source: 'local',
-    title: meta.title,
-    artist: meta.artist || '未知艺术家',
-    album: meta.album || meta.name,
-    cover: meta.cover || '',
+    title: item.title,
+    artist: item.artist || '未知艺术家',
+    album: item.album || '',
+    cover: item.cover || '',
     duration: 0,
   };
   initTrack();
@@ -189,11 +529,22 @@ async function playQueueIndex(index) {
   await publish();
 
   play();                                  // play() 里会调用 audio.play()
-  toast(`正在播放：${meta.title}${player.queue.length > 1 ? `（${index + 1}/${player.queue.length}）` : ''}`);
+  toast(`正在播放：${item.title}（${index + 1}/${playlist.items.length}）`);
 
-  autoMatchLyrics(meta).catch((err) => {   // 后台去 QQ 音乐配歌词
+  autoMatchLyrics(item).catch((err) => {   // 后台去 QQ 音乐配歌词
     console.warn('[mili] 匹配歌词时出错：', err && err.message ? err.message : err);
   });
+}
+
+/** QQ 音乐曲目：取歌词 + 取播放地址，都失败就只提示不硬撑 */
+async function playQQItem(item) {
+  stopAudio();
+  player.playing = false;
+  document.body.classList.remove('playing');
+  setPlayIcon(false);
+
+  const started = await playQQSong(item);
+  if (!started) toast(`《${item.title}》现在放不出来，可按下一首跳过`, 5000);
 }
 
 /* ------------------------------------------------- 本地文件与歌词匹配 */
@@ -295,10 +646,20 @@ async function openLocalFiles() {
   await addToQueue(files, true);
 }
 
+/** 把本地文件加进歌单；playFirst 为真时立刻开始播第一首新加的 */
 async function addToQueue(files, playFirst) {
-  const startIndex = player.queue.length;
-  player.queue.push(...files);
-  if (playFirst) await playQueueIndex(startIndex);
+  const items = files.map(localToItem);
+  const added = addPlaylistItems(items);
+  if (!added) {
+    toast('这些歌已经在歌单里了');
+    return;
+  }
+
+  toast(`已加入歌单 ${added} 首`);
+  if (playFirst) {
+    const index = playlist.items.findIndex((it) => it.id === items[0].id);
+    if (index >= 0) await playIndex(index);
+  }
 }
 
 function bindDrop() {
@@ -508,9 +869,10 @@ function setPlayIcon(playing) {
 /** 把「当前进度 -> 界面」这一段抽出来，rAF 与 timeupdate 都会用 */
 function renderFrame(position) {
   renderProgress();
-  const index = findLineIndex(player.lines, position);
+  const t = lyricTime(position);          // 歌词按偏置后的时间轴走
+  const index = findLineIndex(player.lines, t);
   if (index !== player.activeIndex) setActiveLine(index);
-  updateWords(index, position);
+  updateWords(index, t);
 }
 
 /* ------------------------------------------------------------- 主循环 */
@@ -521,7 +883,7 @@ function tick() {
 
     // 音频的结束由 ended 事件处理；演示模式得自己判
     if (!hasAudio() && player.position >= player.duration) {
-      if (player.loop === 'single') {
+      if (isSingleLoop()) {
         player.position = 0;
         anchorNow();
       } else {
@@ -725,6 +1087,9 @@ function applySettings(settings, fromRemote) {
   $('valFont').textContent = settings.fontSize;
   $('rgOpacity').value = settings.opacity;
   $('valOpacity').textContent = settings.opacity;
+  const offsetValue = Number(settings.lyricOffset) || 0;
+  $('rgOffset').value = offsetValue;
+  $('valOffset').textContent = formatOffset(offsetValue);
   $('rgWidth').value = settings.width;
   $('valWidth').textContent = settings.width;
   const angleMinValue = settings.scatterAngleMin ?? 3;
@@ -744,6 +1109,13 @@ function applySettings(settings, fromRemote) {
 
 function patch(patchObj) {
   window.mili.updateOverlaySettings(patchObj);
+}
+
+/** 歌词延迟的显示：0 就写 0.0，正数带个 + 号，一眼能看出往哪边偏 */
+function formatOffset(seconds) {
+  const value = Number(seconds) || 0;
+  if (!value) return '0.0 秒';
+  return `${value > 0 ? '+' : ''}${value.toFixed(1)} 秒`;
 }
 
 function bindSettings() {
@@ -791,6 +1163,19 @@ function bindSettings() {
       patch({ [key]: value });
     });
   });
+
+  // 歌词延迟：单独接，因为要对齐到 0.1 秒并带上正负号
+  const offsetRange = $('rgOffset');
+  const setOffset = (seconds) => {
+    const value = Math.round(seconds * 10) / 10;      // 避开 0.30000000000000004
+    settingsCache.lyricOffset = value;
+    offsetRange.value = value;
+    $('valOffset').textContent = formatOffset(value);
+    patch({ lyricOffset: value });
+  };
+  offsetRange.addEventListener('input', () => setOffset(Number(offsetRange.value)));
+  offsetRange.addEventListener('dblclick', () => setOffset(0));   // 双击归零
+  $('btnOffsetReset').addEventListener('click', () => setOffset(0));
 
   // 倾斜上下限互相牵制：拖下限超过上限时把上限顶上去，反之亦然
   const angleMin = $('rgAngleMin');
@@ -859,6 +1244,230 @@ function maybeAutoTheme(track, from) {
   toast(`识别到《${hit.label}》，主题色已切换为「${target.name}」`);
   console.log(`[mili] 识别到 ${hit.label}（来源：${from}），主题色 -> ${target.name} ${color}`);
   return true;
+}
+
+/* --------------------------------------------------------- 歌单面板 */
+
+function openPlaylist() {
+  $('settings').classList.remove('open');
+  $('searchPanel').classList.remove('open');
+  $('playlistPanel').classList.add('open');
+  renderPlaylist();
+}
+
+function closePlaylist() {
+  $('playlistPanel').classList.remove('open');
+}
+
+const isPlaylistOpen = () => $('playlistPanel').classList.contains('open');
+
+/** 只刷新头部（计数 / 全选 / 按钮可用性 / 播放模式），不重建列表 */
+function refreshPlaylistHeader() {
+  const total = playlist.items.length;
+  const selected = playlist.selected.size;
+
+  $('plCount').textContent = total
+    ? `${total} 首${selected ? ` · 已选 ${selected}` : ''}`
+    : '歌单是空的';
+
+  const all = $('plSelectAll');
+  all.checked = total > 0 && selected === total;
+  all.indeterminate = selected > 0 && selected < total;   // 部分选中显示成半选
+  all.disabled = total === 0;
+
+  $('plRemove').disabled = selected === 0;
+  $('plPlaySelected').disabled = selected === 0;
+  $('plClear').disabled = total === 0;
+
+  applyPlayModeUI();
+}
+
+function createPlaylistRow(item, index) {
+  const row = document.createElement('div');
+  row.className = 'pl-item';
+  if (index === player.queueIndex) row.classList.add('playing');
+
+  const check = document.createElement('input');
+  check.type = 'checkbox';
+  check.className = 'pl-check';
+  check.checked = playlist.selected.has(item.id);
+  // 只刷新头部，不重建列表 —— 否则每点一个复选框整个歌单都会重画
+  check.addEventListener('change', () => {
+    if (check.checked) playlist.selected.add(item.id);
+    else playlist.selected.delete(item.id);
+    refreshPlaylistHeader();
+  });
+  row.appendChild(check);
+
+  const main = document.createElement('button');
+  main.className = 'pl-main';
+  main.title = '播放这一首';
+
+  const cover = document.createElement('img');
+  cover.className = 'pl-cover';
+  cover.alt = '';
+  if (item.cover) cover.src = item.cover;
+  main.appendChild(cover);
+
+  const meta = document.createElement('div');
+  meta.className = 'pl-meta';
+  const title = document.createElement('div');
+  title.className = 'pl-title';
+  title.textContent = item.title;
+  const sub = document.createElement('div');
+  sub.className = 'pl-sub';
+  sub.textContent = [item.artist, item.kind === 'qq' ? 'QQ 音乐' : '本地']
+    .filter(Boolean).join(' · ');
+  meta.appendChild(title);
+  meta.appendChild(sub);
+  main.appendChild(meta);
+
+  main.addEventListener('click', () => {
+    closePlaylist();
+    playIndex(index);
+  });
+  row.appendChild(main);
+
+  const time = document.createElement('span');
+  time.className = 'pl-time';
+  time.textContent = item.duration ? formatTime(item.duration) : '--:--';
+  row.appendChild(time);
+
+  const del = document.createElement('button');
+  del.className = 'pl-del';
+  del.title = '从歌单移除';
+  del.textContent = '×';
+  del.addEventListener('click', () => {
+    removePlaylistItems([item.id]);
+    toast(`已移除《${item.title}》`);
+  });
+  row.appendChild(del);
+
+  return row;
+}
+
+function renderPlaylist() {
+  const list = $('plList');
+  if (!list) return;
+
+  refreshPlaylistHeader();
+
+  const scrollTop = list.scrollTop;      // 重画后把滚动位置放回去
+  list.innerHTML = '';
+
+  if (!playlist.items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'pl-empty';
+    empty.textContent = '还没有歌。用下面的「添加文件」「添加文件夹」，'
+      + '或把音频拖进窗口，也可以去搜索里点 + 加入。';
+    list.appendChild(empty);
+    return;
+  }
+
+  playlist.items.forEach((item, index) => list.appendChild(createPlaylistRow(item, index)));
+  list.scrollTop = scrollTop;
+}
+
+function bindPlaylist() {
+  $('btnPlaylist').addEventListener('click', () => {
+    if (isPlaylistOpen()) closePlaylist();
+    else openPlaylist();
+  });
+  $('btnPlaylistClose').addEventListener('click', closePlaylist);
+
+  document.querySelectorAll('#segPlayMode button').forEach((btn) => {
+    btn.addEventListener('click', () => setPlayMode(btn.dataset.mode));
+  });
+
+  $('plSelectAll').addEventListener('change', (event) => {
+    if (event.target.checked) playlist.items.forEach((it) => playlist.selected.add(it.id));
+    else playlist.selected.clear();
+    renderPlaylist();
+  });
+
+  $('plRemove').addEventListener('click', () => {
+    if (!playlist.selected.size) return;
+    if (!window.confirm(`确定从播放列表移除选中的 ${playlist.selected.size} 首吗？`)) return;
+
+    const removed = removePlaylistItems([...playlist.selected]);
+    toast(removed ? `已移除 ${removed} 首` : '没有选中任何歌曲');
+  });
+
+  $('plClear').addEventListener('click', () => {
+    if (!playlist.items.length) return;
+    // 不可撤销的操作问一句；移除选中也问，但清空更狠，额外说清数量
+    if (!window.confirm(`确定清空整个播放列表吗？共 ${playlist.items.length} 首。`)) return;
+
+    const removed = removePlaylistItems(playlist.items.map((it) => it.id));
+    toast(`已清空 ${removed} 首`);
+  });
+
+  $('plPlaySelected').addEventListener('click', async () => {
+    const first = playlist.items.findIndex((it) => playlist.selected.has(it.id));
+    if (first < 0) { toast('先勾选要播放的歌曲'); return; }
+    closePlaylist();
+    await playIndex(first);
+  });
+
+  $('plAddFiles').addEventListener('click', async () => {
+    const files = await window.mili.pickAudioFiles();
+    if (!files || !files.length) return;
+    const added = addPlaylistItems(files.map(localToItem));
+    toast(added ? `已加入歌单 ${added} 首` : '这些歌已经在歌单里了');
+  });
+
+  $('plAddFolder').addEventListener('click', async () => {
+    const res = await window.mili.pickAudioFolder();
+    if (!res || !res.ok) return;
+    if (!res.files.length) { toast('这个文件夹里没有找到音频文件'); return; }
+
+    const added = addPlaylistItems(res.files.map(localToItem));
+    toast(res.truncated
+      ? `文件夹太大，只取了前 ${res.files.length} 首（加入 ${added} 首）`
+      : `从文件夹加入 ${added} 首`);
+  });
+}
+
+/** 启动时把上次的歌单读回来 */
+async function loadPlaylist() {
+  let savedMode = 'list';
+
+  try {
+    const saved = await window.mili.loadPlaylist();
+    savedMode = PLAY_MODE_LABEL[saved.playMode] ? saved.playMode : 'list';
+    playlist.items = Array.isArray(saved.items) ? saved.items : [];
+
+    if (saved.corrupt) {
+      // 文件坏了：主进程已经备份，这里明确告诉用户，并且**不允许保存**以免覆盖
+      console.warn('[mili] 歌单文件损坏，已跳过载入');
+      toast('歌单文件读取失败，已备份原文件；本次不会写入，以免覆盖', 9000);
+    } else {
+      playlistLoaded = true;
+      if (playlist.items.length) {
+        console.log(`[mili] 已载入歌单：${playlist.items.length} 首（${PLAY_MODE_LABEL[savedMode]}）`);
+      }
+    }
+  } catch (err) {
+    // 读失败时 playlistLoaded 保持 false，后续任何保存都会被拦下
+    console.warn('[mili] 读取歌单失败，本次不会写入：', err.message);
+    toast('歌单读取失败，本次不会写入，以免覆盖磁盘上的歌单', 9000);
+  }
+
+  // 走 setPlayMode 而不是直接赋值：它会顺带同步两处 UI 和 <audio>.loop
+  setPlayMode(savedMode, { quiet: true });
+  renderPlaylist();
+
+  /*
+   * 老版本的 playlist.json 把本地封面也存进去了（几十首就能到几 MB）。
+   * 检测到就立刻重写一次把它瘦回来，不用等用户下次改歌单。
+   */
+  if (playlist.items.some((it) => it.kind === 'local' && it.cover)) {
+    console.log('[mili] 检测到歌单里存了本地封面，正在重写以缩小文件');
+    savePlaylistSoon();
+  }
+
+  // 封面在后台补，不挡启动
+  hydrateLocalCovers().catch(() => {});
 }
 
 /* --------------------------------------------------- QQ 音乐搜索面板 */
@@ -934,6 +1543,17 @@ function renderResults(songs) {
     });
     row.appendChild(play);
 
+    // 右侧：加入歌单（会先确认这首歌真能播，放不了的不收）
+    const add = document.createElement('button');
+    add.className = 'result-add';
+    add.title = qqLoggedIn ? '加入歌单（先确认能不能播放）' : '登录后可加入歌单';
+    add.innerHTML = '<svg viewBox="0 0 24 24" class="ico"><path d="M12 5v14M5 12h14"/></svg>';
+    add.addEventListener('click', (event) => {
+      event.stopPropagation();
+      addQQToPlaylist(song, add);
+    });
+    row.appendChild(add);
+
     box.appendChild(row);
   });
 
@@ -957,7 +1577,7 @@ async function doSearch() {
     setSearchStatus('没有找到结果', true);
     return;
   }
-  setSearchStatus(`找到 ${res.songs.length} 首 · 点一下载入歌词，点右侧 ▶ 在线播放`);
+  setSearchStatus(`找到 ${res.songs.length} 首 · 点歌名载入歌词 · ▶ 在线播放 · ＋ 加入歌单`);
   renderResults(res.songs);
 }
 
@@ -1018,8 +1638,7 @@ async function attachOnlineAudio(song) {
     return false;
   }
 
-  player.queue = [];
-  player.queueIndex = -1;
+  // 这里不能再清空播放列表了 —— 歌单现在是持久的，播一首在线歌曲不该把它抹掉
   audioUrl = info.url;
   audioKind = 'online';
   audio.src = info.url;
@@ -1106,9 +1725,48 @@ async function playQQSong(song) {
   return true;
 }
 
-/** 点搜索结果右侧的 ▶ */
-async function playQQRow(song, btn) {
+/**
+ * 点搜索结果右侧的 ＋：先确认这首歌**真能播放**，再加进歌单。
+ * 不能放的（没版权 / 需要 VIP / 取不到地址）就不该进歌单 ——
+ * 否则歌单里会攒一堆点开就失败的歌。
+ */
+async function addQQToPlaylist(song, btn) {
   if (!qqLoggedIn) {
+    toast('需要先登录 QQ 音乐才能加入歌单');
+    return;
+  }
+
+  if (playlist.items.some((it) => it.id === `qq:${song.mid}`)) {
+    toast(`《${song.title}》已经在歌单里了`);
+    return;
+  }
+
+  if (btn) btn.classList.add('loading');
+  setSearchStatus(`正在确认《${song.title}》能不能播放…`);
+
+  let check;
+  try {
+    check = await window.mili.qqCheckPlayable(song);
+  } catch (err) {
+    check = { ok: false, error: err.message };
+  }
+
+  if (btn) btn.classList.remove('loading');
+  setSearchStatus('');
+
+  if (!check || !check.ok) {
+    const why = (check && check.error) || '没有播放权限';
+    toast(`《${song.title}》放不出来，没有加入歌单（${why}）`, 6500);
+    console.warn('[mili] 加入歌单被拒：', song.title, why);
+    return;
+  }
+
+  addPlaylistItems([qqToItem(song)]);
+  toast(`已加入歌单：《${song.title}》${check.quality ? `（${check.quality}）` : ''}`);
+}
+
+/** 点搜索结果右侧的 ▶ */
+async function playQQRow(song, btn) {  if (!qqLoggedIn) {
     toast('需要先登录 QQ 音乐才能在线播放');
     return;
   }
@@ -1147,20 +1805,10 @@ function bindControls() {
   $('btnMin').addEventListener('click', () => window.mili.minimize());
   $('btnClose').addEventListener('click', () => window.mili.close());
 
-  const LOOP_ICONS = {
-    list: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/>',
-    single: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/><path d="M11.2 10.6l1.5-.9V15"/>',
-    shuffle: '<path d="M16 3h5v5"/><path d="M4 20L21 4"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/>',
-  };
-  const LOOP_TITLE = { list: '循环：列表', single: '循环：单曲', shuffle: '随机播放' };
-  const order = ['list', 'single', 'shuffle'];
-
+  // 循环按钮：在四种播放模式里轮转，和歌单面板里的分段控件是同一个状态
   $('btnLoop').addEventListener('click', () => {
-    player.loop = order[(order.indexOf(player.loop) + 1) % order.length];
-    $('loopIcon').innerHTML = LOOP_ICONS[player.loop];
-    $('btnLoop').title = LOOP_TITLE[player.loop];
-    $('btnLoop').classList.toggle('active', player.loop !== 'list');
-    audio.loop = player.loop === 'single';
+    const next = PLAY_MODE_ORDER[(PLAY_MODE_ORDER.indexOf(playlist.playMode) + 1) % PLAY_MODE_ORDER.length];
+    setPlayMode(next);
   });
 
   $('btnMute').addEventListener('click', () => {
@@ -1214,19 +1862,23 @@ function bindAudio() {
   });
 
   audio.addEventListener('ended', () => {
-    if (player.loop === 'single') {
+    // 单曲循环正常靠 <audio>.loop 原生实现，根本走不到这里；留着是兜底
+    if (isSingleLoop()) {
       audio.currentTime = 0;
       play();
       return;
     }
-    if (player.queueIndex + 1 < player.queue.length) {
-      playQueueIndex(player.queueIndex + 1);
+
+    const n = playlist.items.length;
+    const isLast = player.queueIndex >= n - 1;
+    // 随机模式总有下一首（袋子空了会重洗）；顺序模式播到末尾时看是不是列表循环
+    const shouldAdvance = n > 1 && (isShuffle() || !isLast || playlist.playMode === 'list');
+
+    if (shouldAdvance) {
+      playIndex(stepIndex(1));
       return;
     }
-    if (player.loop === 'list' && player.queue.length > 1) {
-      playQueueIndex(0);
-      return;
-    }
+
     pause();
     player.position = player.duration;
     renderFrame(player.position);
@@ -1258,9 +1910,11 @@ async function init() {
   initTrack();
   bindControls();
   bindSettings();
+  bindPlaylist();
   bindAudio();
   bindDrop();
 
+  await loadPlaylist();
   await publish();
 
   const state = await window.mili.getState();

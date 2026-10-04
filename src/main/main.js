@@ -45,6 +45,7 @@ function pickDataDir() {
 
 const DATA_DIR = pickDataDir();
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const PLAYLIST_FILE = path.join(DATA_DIR, 'playlist.json');
 const ASSETS = path.join(ROOT, 'assets');
 
 // 用户可自行编辑的文件：自定义色号 + 彩蛋规则，放一起
@@ -563,6 +564,37 @@ function describeAudioFiles(paths) {
   }));
 }
 
+/*
+ * 递归扫出一个文件夹里的音频文件。
+ * 带深度和数量上限 —— 万一有人不小心选了盘符根目录，不至于把整个盘扫一遍。
+ */
+const MAX_FOLDER_FILES = 3000;
+const MAX_FOLDER_DEPTH = 8;
+
+function collectAudioFiles(dir, out = [], depth = 0) {
+  if (depth > MAX_FOLDER_DEPTH || out.length >= MAX_FOLDER_FILES) return out;
+
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;                     // 没权限的目录直接跳过，不要因为一个子目录整体失败
+  }
+
+  for (const entry of entries) {
+    if (out.length >= MAX_FOLDER_FILES) break;
+    if (entry.name.startsWith('.')) continue;     // 跳过隐藏目录/文件
+
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectAudioFiles(full, out, depth + 1);
+    } else if (AUDIO_EXT.has(path.extname(entry.name).toLowerCase())) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
 ipcMain.handle('audio:pick', async () => {
   const result = await dialog.showOpenDialog(playerWindow, {
     title: '选择音乐文件',
@@ -576,8 +608,110 @@ ipcMain.handle('audio:pick', async () => {
   return describeAudioFiles(result.filePaths);
 });
 
+ipcMain.handle('audio:pickFolder', async () => {
+  const result = await dialog.showOpenDialog(playerWindow, {
+    title: '选择音乐文件夹',
+    properties: ['openDirectory'],
+  });
+  if (result.canceled || !result.filePaths.length) return { ok: true, files: [], truncated: false };
+
+  const found = collectAudioFiles(result.filePaths[0]);
+  return {
+    ok: true,
+    files: describeAudioFiles(found),
+    truncated: found.length >= MAX_FOLDER_FILES,
+  };
+});
+
 // 拖进窗口的文件也走这里（拖拽只给到路径，标签仍需主进程读）
 ipcMain.handle('audio:describe', (_e, paths) => describeAudioFiles(paths));
+
+/*
+ * 只取封面。歌单文件里**不存**本地文件的封面 ——
+ * 内嵌封面动辄上百 KB 的 base64，几十首就能把 playlist.json 撑到几 MB，
+ * 每次改歌单都得 stringify 一遍。所以改成启动后按需回填。
+ */
+ipcMain.handle('audio:covers', (_e, paths) => {
+  const list = Array.isArray(paths) ? paths : [];
+  return list.map((filePath) => {
+    try {
+      return { path: filePath, cover: readAudioMeta(filePath).cover || '' };
+    } catch {
+      return { path: filePath, cover: '' };
+    }
+  });
+});
+
+/* --------------------------------------------------------- 播放列表 */
+
+/*
+ * 播放模式四态，和 QQ 音乐那类播放器一致：
+ *   order   顺序播放   —— 放完整个列表就停
+ *   list    列表循环   —— 放完回到第一首
+ *   single  单曲循环   —— 当前这首反复放
+ *   shuffle 随机播放   —— 洗牌袋，一轮之内不重复
+ */
+const PLAY_MODES = ['order', 'list', 'single', 'shuffle'];
+
+/** 老版本的 playlist.json 里只有 mode: sequential|shuffle（配的是「循环：列表」） */
+function normalizePlayMode(value) {
+  if (PLAY_MODES.includes(value)) return value;
+  if (value === 'shuffle') return 'shuffle';
+  return 'list';
+}
+
+ipcMain.handle('playlist:load', () => {
+  if (!fs.existsSync(PLAYLIST_FILE)) return { playMode: 'list', items: [] };
+
+  try {
+    const data = JSON.parse(fs.readFileSync(PLAYLIST_FILE, 'utf8')) || {};
+    return {
+      playMode: normalizePlayMode(data.playMode || data.mode),
+      items: Array.isArray(data.items) ? data.items : [],
+    };
+  } catch (err) {
+    /*
+     * 文件坏了：**先原样备份再当成空**，并且告诉渲染层「这次没读成功」。
+     * 渲染层收到 corrupt 就不会允许保存，否则一个空列表会把磁盘上的歌单盖掉。
+     */
+    const backup = `${PLAYLIST_FILE}.corrupt-${Date.now()}`;
+    try { fs.copyFileSync(PLAYLIST_FILE, backup); } catch { /* 忽略 */ }
+    console.warn(`[mili] 歌单文件解析失败，已备份到 ${path.basename(backup)}：${err.message}`);
+    return { playMode: 'list', items: [], corrupt: true, backup };
+  }
+});
+
+const PLAYLIST_BACKUP = `${PLAYLIST_FILE}.bak`;
+
+ipcMain.handle('playlist:save', (_e, payload) => {
+  const data = {
+    playMode: normalizePlayMode(payload && payload.playMode),
+    items: payload && Array.isArray(payload.items) ? payload.items : [],
+  };
+  const text = JSON.stringify(data, null, 2);
+
+  try {
+    // 先把上一版留一份，误清空时还能捞回来
+    try {
+      if (fs.existsSync(PLAYLIST_FILE)) fs.copyFileSync(PLAYLIST_FILE, PLAYLIST_BACKUP);
+    } catch { /* 备份失败不该挡住保存 */ }
+
+    /*
+     * 先写临时文件再改名 —— 直接 writeFileSync 覆盖原文件的话，
+     * 写一半断电/被杀就是文件截断，下次启动读到坏文件，歌单就没了。
+     * rename 在同一分区上是原子的。
+     */
+    const tmp = `${PLAYLIST_FILE}.tmp`;
+    fs.writeFileSync(tmp, text, 'utf8');
+    fs.renameSync(tmp, PLAYLIST_FILE);
+
+    return { ok: true, count: data.items.length };
+  } catch (err) {
+    console.warn('[mili] 保存播放列表失败：', err.message);
+    try { fs.rmSync(`${PLAYLIST_FILE}.tmp`, { force: true }); } catch { /* 忽略 */ }
+    return { ok: false, error: err.message };
+  }
+});
 
 /* ------------------------------------------------------- QQ 音乐 */
 
@@ -616,7 +750,12 @@ ipcMain.handle('qq:logout', async () => {
   return qqSession.status();
 });
 
-ipcMain.handle('qq:playurl', async (_e, song) => {
+/**
+ * 取某首歌的可用播放地址并做预检。
+ * qq:playurl（真的播放）与 qq:checkPlayable（判断能否收进歌单）共用这一份，
+ * 免得两边的判断标准悄悄跑偏，出现「能加进歌单却放不出来」这种事。
+ */
+async function resolvePlayUrl(song) {
   try {
     const info = await qqmusic.getSongUrl(song.mid);
     if (!info.ok) return { ...info, mid: song.mid };
@@ -641,8 +780,24 @@ ipcMain.handle('qq:playurl', async (_e, song) => {
     };
   } catch (err) {
     console.warn('[mili] 取播放地址失败：', err.message);
-    return { ok: false, error: err.message };
+    return { ok: false, mid: song.mid, error: err.message };
   }
+}
+
+ipcMain.handle('qq:playurl', (_e, song) => resolvePlayUrl(song));
+
+/*
+ * 加入歌单前先问一句「这首歌真能放吗」。
+ * 不能放的（没版权 / 需要 VIP）就不该进歌单，否则点开只会是一串失败。
+ */
+ipcMain.handle('qq:checkPlayable', async (_e, song) => {
+  const result = await resolvePlayUrl(song);
+  return {
+    ok: Boolean(result.ok),
+    mid: song && song.mid,
+    quality: result.quality || '',
+    error: result.error || '',
+  };
 });
 
 /* --------------------------------------------------------- 生命周期 */

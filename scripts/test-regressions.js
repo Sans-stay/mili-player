@@ -77,6 +77,11 @@ ipcMain.handle('overlay:update-settings', (_e, patch) => {
 ipcMain.handle('qq:session', () => ({ loggedIn: false, uin: '', hasKey: false }));
 /* 搜索结果回空列表：正好模拟「换到一首匹配不到歌词的歌」 */
 ipcMain.handle('qq:search', () => ({ ok: true, songs: [] }));
+
+/* 歌单：测试期间不落盘，也不读真实歌单（免得跑测试改到用户的数据） */
+ipcMain.handle('playlist:load', () => ({ playMode: 'list', items: [] }));
+ipcMain.handle('playlist:save', (_e, payload) => ({ ok: true, count: (payload.items || []).length }));
+ipcMain.handle('audio:pickFolder', () => ({ ok: true, files: [], truncated: false }));
 ipcMain.handle('qq:login', () => ({ ok: false, canceled: true, error: '测试宿主未接入登录' }));
 ipcMain.handle('qq:logout', () => ({ loggedIn: false, uin: '', hasKey: false }));
 ipcMain.handle('qq:playurl', (_e, song) => ({ ok: false, needLogin: true, error: '需要先登录 QQ 音乐', mid: song.mid }));
@@ -416,17 +421,16 @@ async function testOverlayClearsWhenLyricsGone() {
   await sleep(2500);
   const before = await snapshotItems();
 
-  // 真实换歌：队列里塞一首匹配不到歌词的假音频
+  // 真实换歌：把一首匹配不到歌词的假音频加进歌单并立刻播放
   await playerWin.webContents.executeJavaScript(`
     (function () {
-      player.queue = [{
+      addToQueue([{
         path: 'C:/mili-test/没有歌词的歌.mp3',
         url: 'file:///C:/mili-test/no-lyrics.mp3',
         title: '没有歌词的歌',
         artist: '佚名',
         name: 'no-lyrics',
-      }];
-      playQueueIndex(0);          // 故意不 await，它就是后台跑的
+      }], true);                  // 故意不 await，它本来就是后台跑的
       return true;
     })()
   `);
@@ -441,6 +445,277 @@ async function testOverlayClearsWhenLyricsGone() {
     detail: `切换前 ${before.length} 句 -> 切换后 ${after.length} 句；` +
       `主进程收到的歌词条数=${publishedLines}` +
       (after.length ? `（残留：${after.map((v) => v.text).join(' / ')}）` : ''),
+  });
+}
+
+/**
+ * 歌单：去重、全选、批量移除、顺序 / 随机。
+ * 全部走真实函数，不 mock —— 这些逻辑出问题在界面上很难一眼看出来。
+ */
+async function testPlaylistBasics() {
+  const r = await playerWin.webContents.executeJavaScript(`
+    (function () {
+      var mk = function (n) {
+        return localToItem({ path: 'C:/pl/' + n + '.mp3', url: 'file:///C:/pl/' + n + '.mp3',
+                             title: n, artist: 'T' });
+      };
+
+      playlist.items = [];
+      playlist.selected.clear();
+      playlist.playMode = 'list';
+
+      // 1) 加入时去重：甲 乙 甲 -> 只进 2 首
+      var added = addPlaylistItems([mk('甲'), mk('乙'), mk('甲')]);
+      var afterDup = playlist.items.length;
+
+      // 2) 全选
+      var all = document.getElementById('plSelectAll');
+      all.checked = true;
+      all.dispatchEvent(new Event('change'));
+      var selectedAll = playlist.selected.size;
+      var countText = document.getElementById('plCount').textContent;
+
+      // 3) 批量移除
+      var removed = removePlaylistItems(Array.from(playlist.selected));
+      var leftAfterRemove = playlist.items.length;
+
+      // 4) 顺序播放：0 -> 1 -> 2 -> 0
+      //    stepIndex 是「相对当前项」算的，所以要像真实的 playIndex 那样推进 queueIndex
+      playlist.items = [mk('一'), mk('二'), mk('三')];
+      player.queueIndex = 0;
+      playlist.playMode = 'list';
+      var seq = [];
+      for (var k = 0; k < 4; k += 1) {
+        player.queueIndex = stepIndex(1);
+        seq.push(player.queueIndex);
+      }
+
+      // 5) 随机播放用「洗牌袋」：一轮之内绝不重复
+      playlist.items = [mk('r1'), mk('r2'), mk('r3'), mk('r4'), mk('r5'), mk('r6')];
+      playlist.playMode = 'shuffle';
+      playlist.history = [];
+      player.queueIndex = 0;
+      refillBag();
+      // 正在播的第 0 首算「这一轮已经听过」（真实路径里 playIndex 会做这件事）
+      playlist.bag = playlist.bag.filter(function (id) { return id !== playlist.items[0].id; });
+
+      var round = [0];
+      for (var k2 = 0; k2 < 5; k2 += 1) {
+        player.queueIndex = stepIndex(1);
+        round.push(player.queueIndex);
+      }
+      var distinct = new Set(round).size;
+
+      // 6) 这一轮掏空后再按一次：重新洗一轮，且开头不能是刚播完那首
+      var lastOfRound = player.queueIndex;
+      player.queueIndex = stepIndex(1);
+      var afterRefill = player.queueIndex;
+      var bagLeft = playlist.bag.length;
+
+      // 7) 随机模式下的「上一首」走 history（存的是 id，不是标题）
+      playlist.history = [playlist.items[2].id];
+      var back = stepIndex(-1);
+
+      return {
+        added: added, afterDup: afterDup,
+        selectedAll: selectedAll, countText: countText,
+        removed: removed, leftAfterRemove: leftAfterRemove,
+        seq: seq, round: round, distinct: distinct,
+        lastOfRound: lastOfRound, afterRefill: afterRefill, bagLeft: bagLeft,
+        back: back,
+        items: playlist.items.length,
+      };
+    })()
+  `);
+
+  results.push({
+    name: 'H1. 加入歌单会去重',
+    ok: r.added === 2 && r.afterDup === 2,
+    detail: `三条（甲/乙/甲）里加进去 ${r.added} 条，列表共 ${r.afterDup} 首`,
+  });
+
+  results.push({
+    name: 'H2. 全选与计数',
+    ok: r.selectedAll === 2 && r.countText.includes('2 首') && r.countText.includes('已选 2'),
+    detail: `选中 ${r.selectedAll} 首，计数显示「${r.countText}」`,
+  });
+
+  results.push({
+    name: 'H3. 批量移除选中项',
+    ok: r.removed === 2 && r.leftAfterRemove === 0,
+    detail: `移除 ${r.removed} 首，剩下 ${r.leftAfterRemove} 首`,
+  });
+
+  const seqOk = JSON.stringify(r.seq) === JSON.stringify([1, 2, 0, 1]);
+  results.push({
+    name: 'H4. 顺序播放按 0→1→2→0 绕圈',
+    ok: seqOk,
+    detail: `从 0 开始连按下一首得到 [${r.seq.join(', ')}]（期望 [1, 2, 0, 1]）`,
+  });
+
+  const rndInRange = r.round.every((v) => v >= 0 && v <= 5);
+  results.push({
+    name: 'H5. 随机播放一轮之内不重复（洗牌袋）',
+    ok: r.distinct === 6 && rndInRange,
+    detail: `连播 6 首走过下标 [${r.round.join(', ')}]，不同值 ${r.distinct} 个（期望 6）`,
+  });
+
+  results.push({
+    name: 'H6. 一轮走完后重新洗牌，且不与上一轮末首相连',
+    ok: r.bagLeft === 5 && r.afterRefill !== r.lastOfRound,
+    detail: `上一轮末首下标 ${r.lastOfRound}，新一轮首曲下标 ${r.afterRefill}，`
+      + `袋里还剩 ${r.bagLeft} 首（期望 5）`,
+  });
+
+  results.push({
+    name: 'H7. 随机模式的「上一首」回到来路',
+    ok: r.back === 2,
+    detail: `把第 3 首的 id 压进 history 后，上一首 -> 下标 ${r.back}（期望 2）`,
+  });
+}
+
+/**
+ * 播放模式四态：顺序 / 列表循环 / 单曲循环 / 随机。
+ * 重点是「两处 UI 必须同步」和「末首放完之后按模式分流」——
+ * 这两件事各自都很容易悄悄坏掉。
+ */
+async function testPlayModes() {
+  const r = await playerWin.webContents.executeJavaScript(`
+    (function () {
+      var mk = function (n) {
+        return localToItem({ path: 'C:/pm/' + n + '.mp3', url: 'file:///C:/pm/' + n + '.mp3',
+                             title: n, artist: 'T' });
+      };
+
+      // 1) 切到单曲循环：面板分段控件与循环按钮都要跟着变
+      setPlayMode('single', { quiet: true });
+      var segOn = document.querySelector('#segPlayMode button.on');
+      var segMode = segOn ? segOn.dataset.mode : '(没有选中项)';
+      var loopTitle = document.getElementById('btnLoop').title;
+      var singleAudioLoop = audio.loop;
+
+      // 2) 换回列表循环时要把原生 loop 关掉，否则会一直重复同一首
+      setPlayMode('list', { quiet: true });
+      var listAudioLoop = audio.loop;
+
+      // 3) 顺序播放：最后一首放完就停，不该跳回第一首
+      setPlayMode('order', { quiet: true });
+      playlist.items = [mk('a'), mk('b'), mk('c')];
+      player.queueIndex = 2;
+      player.playing = true;
+      audio.dispatchEvent(new Event('ended'));
+      var afterOrderLast = player.queueIndex;
+
+      // 4) 列表循环：最后一首放完要回到第一首
+      setPlayMode('list', { quiet: true });
+      playlist.items = [mk('a'), mk('b'), mk('c')];
+      player.queueIndex = 2;
+      audio.dispatchEvent(new Event('ended'));
+      var afterListLast = player.queueIndex;
+
+      return {
+        segMode: segMode, loopTitle: loopTitle,
+        singleAudioLoop: singleAudioLoop, listAudioLoop: listAudioLoop,
+        afterOrderLast: afterOrderLast, afterListLast: afterListLast,
+      };
+    })()
+  `);
+
+  results.push({
+    name: 'I1. 切模式时歌单面板与循环按钮同步',
+    ok: r.segMode === 'single' && r.loopTitle.includes('单曲循环'),
+    detail: `面板选中「${r.segMode}」，循环按钮提示「${r.loopTitle}」`,
+  });
+
+  results.push({
+    name: 'I2. 单曲循环开原生 loop，换回列表时关掉',
+    ok: r.singleAudioLoop === true && r.listAudioLoop === false,
+    detail: `单曲时 audio.loop=${r.singleAudioLoop}，列表循环时 audio.loop=${r.listAudioLoop}`,
+  });
+
+  results.push({
+    name: 'I3. 顺序播放在最后一首放完就停住',
+    ok: r.afterOrderLast === 2,
+    detail: `末首播完后停在下标 ${r.afterOrderLast}（期望 2，不跳回第一首）`,
+  });
+
+  results.push({
+    name: 'I4. 列表循环在最后一首回到第一首',
+    ok: r.afterListLast === 0,
+    detail: `末首播完后跳到下标 ${r.afterListLast}（期望 0）`,
+  });
+}
+
+/**
+ * 歌词延迟：句子切换与逐字高亮必须落在同一条偏移后的时间轴上。
+ * 两个窗口各有一份实现，所以两边都要验。
+ */
+async function testLyricOffset() {
+  const r = await playerWin.webContents.executeJavaScript(`
+    (function () {
+      setLyrics([
+        { time: 0, text: '零', words: [{ text: '零', time: 0, dur: 10 }] },
+        { time: 10, text: '十', words: [{ text: '十', time: 10, dur: 10 }] },
+        { time: 20, text: '二十', words: [{ text: '二十', time: 20, dur: 10 }] },
+      ], 60);
+
+      var at = function (pos) { return findLineIndex(player.lines, lyricTime(pos)); };
+
+      settingsCache.lyricOffset = 0;
+      var base = at(10.5);
+
+      settingsCache.lyricOffset = 2;      // 歌词往后推 2 秒 -> 时间轴退到 8.5，还停在第一句
+      var delayed = at(10.5);
+
+      settingsCache.lyricOffset = -12;    // 歌词提前 12 秒 -> 时间轴前进到 22.5，已经第三句
+      var early = at(10.5);
+
+      settingsCache.lyricOffset = 0;
+      return {
+        base: base, delayed: delayed, early: early,
+        label: formatOffset(2.5), zero: formatOffset(0),
+        ui: [
+          Boolean(document.getElementById('rgOffset')),
+          Boolean(document.getElementById('valOffset')),
+          Boolean(document.getElementById('btnOffsetReset')),
+        ].every(Boolean),
+      };
+    })()
+  `);
+
+  results.push({
+    name: 'J1. 歌词延迟会平移句子定位',
+    ok: r.base === 1 && r.delayed === 0 && r.early === 2,
+    detail: `10.5 秒处：不偏移=${r.base}（期望 1）；+2 秒=${r.delayed}（期望 0）；-12 秒=${r.early}（期望 2）`,
+  });
+
+  results.push({
+    name: 'J2. 延迟值显示带正负号，0 不带',
+    ok: r.label === '+2.5 秒' && r.zero === '0.0 秒',
+    detail: `formatOffset(2.5) = 「${r.label}」，formatOffset(0) = 「${r.zero}」`,
+  });
+
+  // 悬浮窗读的是自己那份 view.settings，单独验一次
+  const overlayT = await overlayWin.webContents.executeJavaScript(`
+    (function () {
+      var saved = view.settings.lyricOffset;
+      view.settings.lyricOffset = 2;
+      var t = lyricTime(10.5);
+      view.settings.lyricOffset = saved;
+      return t;
+    })()
+  `);
+
+  results.push({
+    name: 'J3. 悬浮窗用同一条偏移时间轴',
+    ok: Math.abs(overlayT - 8.5) < 0.001,
+    detail: `悬浮窗 lyricTime(10.5)（延迟 2 秒）= ${overlayT}（期望 8.5）`,
+  });
+
+  results.push({
+    name: 'J4. 样式面板里有滑杆、数值与归零按钮',
+    ok: r.ui,
+    detail: r.ui ? 'rgOffset / valOffset / btnOffsetReset 都在' : '有元素缺失',
   });
 }
 
@@ -493,6 +768,9 @@ async function run() {
   await testLyricsChangeStillRebuilds();
   await testEmptyLyricsPlaceholder();
   await testOverlayClearsWhenLyricsGone();
+  await testPlaylistBasics();
+  await testPlayModes();
+  await testLyricOffset();
 
   console.log('\n================ 回归测试结果 ================');
   for (const r of results) {
