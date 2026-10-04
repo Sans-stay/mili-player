@@ -21,6 +21,7 @@ const COLOR_PRESETS = [
   { key: 'inferno', name: '炼狱红', song: 'In Hell We Live, Lament', color: '#b30000', builtin: true },
   { key: 'fresh', name: '清新绿', song: '1000x1000', color: '#4ede9f', builtin: true },
   { key: 'blaze', name: '燃烧红', song: 'Iron Lotus', color: '#f00000', builtin: true },
+  { key: 'white',  name: '凄惨白', color: '#d6d6d6', builtin: true },
 ];
 
 /**
