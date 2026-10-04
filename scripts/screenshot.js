@@ -188,6 +188,21 @@ async function shoot() {
   const playerShot = await playerWin.webContents.capturePage();
   fs.writeFileSync(path.join(OUT, 'player.png'), playerShot.toPNG());
 
+  // 再截一张「这首歌没找到歌词」的空状态 —— 以前这里是一片空白
+  await playerWin.webContents.executeJavaScript(`
+    setLyrics([], 0);
+    setLyricsPlaceholder('none', '匹配到了歌曲，但它没有可用的歌词');
+  `);
+  await sleep(500);
+  const emptyShot = await playerWin.webContents.capturePage();
+  fs.writeFileSync(path.join(OUT, 'player-empty-lyrics.png'), emptyShot.toPNG());
+
+  // 把歌词恢复回去，免得影响后面两张截图
+  await playerWin.webContents.executeJavaScript(
+    `setLyrics(${JSON.stringify(state.lines)}, ${JSON.stringify(state.duration)});`,
+  );
+  await sleep(300);
+
   // 再截一张展开样式面板的，用来看色号胶囊
   playerWin.webContents.send('mili:command', { type: 'panel', open: true });
   await sleep(800);
@@ -198,6 +213,7 @@ async function shoot() {
   fs.writeFileSync(path.join(OUT, 'overlay.png'), overlayShot.toPNG());
 
   console.log('已保存：', path.join(OUT, 'player.png'));
+  console.log('已保存：', path.join(OUT, 'player-empty-lyrics.png'));
   console.log('已保存：', path.join(OUT, 'player-settings.png'));
   console.log('已保存：', path.join(OUT, 'overlay.png'));
   app.quit();

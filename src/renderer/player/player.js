@@ -177,13 +177,23 @@ async function playQueueIndex(index) {
   };
   initTrack();
   setLyrics([], 0);                       // 先清空，等歌词匹配回来
+  setLyricsPlaceholder('loading', '正在去 QQ 音乐匹配这首歌的歌词…');
   $('timeTotal').textContent = '--:--';
   renderProgress();
+
+  /*
+   * 立刻把「换了歌 + 暂时还没有歌词」推给主进程。
+   * 少了这一步，悬浮窗就只会在匹配成功时才收到新歌词（publish 只在成功分支里），
+   * 匹配失败时它会一直渲染上一首歌的字幕。
+   */
+  await publish();
 
   play();                                  // play() 里会调用 audio.play()
   toast(`正在播放：${meta.title}${player.queue.length > 1 ? `（${index + 1}/${player.queue.length}）` : ''}`);
 
-  autoMatchLyrics(meta);                   // 后台去 QQ 音乐配歌词
+  autoMatchLyrics(meta).catch((err) => {   // 后台去 QQ 音乐配歌词
+    console.warn('[mili] 匹配歌词时出错：', err && err.message ? err.message : err);
+  });
 }
 
 /* ------------------------------------------------- 本地文件与歌词匹配 */
@@ -240,23 +250,29 @@ async function fetchLyrics(song) {
 /** 载入本地文件后，自动用「标题 + 艺术家」去 QQ 音乐配歌词 */
 async function autoMatchLyrics(meta) {
   const query = [meta.title, meta.artist].filter(Boolean).join(' ').trim();
-  if (!query) return;
+  if (!query) {
+    setLyricsPlaceholder('none', '文件名里没有可用的歌名信息，可以手动搜索');
+    return;
+  }
 
   toast(`正在为《${meta.title}》匹配歌词…`, 8000);
   const res = await window.mili.searchQQ(query);
   if (!res.ok || !res.songs.length) {
+    setLyricsPlaceholder('none', 'QQ 音乐里没搜到这首歌，可以手动搜索');
     toast('没能匹配到歌词，可点放大镜手动搜索');
     return;
   }
 
   const song = pickBestMatch(res.songs, meta);
   if (!song) {
+    setLyricsPlaceholder('none', '没有找到足够接近的版本，可以手动搜索');
     toast('没找到足够接近的歌词，可点放大镜手动搜索');
     return;
   }
 
   const hit = await fetchLyrics(song);
   if (!hit) {
+    setLyricsPlaceholder('none', '匹配到了歌曲，但它没有可用的歌词');
     toast('匹配到的歌曲没有可用歌词，可手动搜索');
     return;
   }
@@ -320,12 +336,67 @@ function bindDrop() {
 
 /* -------------------------------------------------------------- 歌词 */
 
+/*
+ * 歌词区的空状态。
+ * ---------------------------------------------------------------
+ * 以前这里什么都不渲染 —— 播放一首找不到歌词的歌时，整个歌词区就是一片空白，
+ * 用户分不清是「还在匹配中」还是「这首歌根本没有歌词」，也不知道下一步该干嘛。
+ * 悬浮窗那边一直有空状态（body.idle 显示「暂无歌词」），主窗口这边补上，两边就对齐了。
+ */
+let lyricsPlaceholder = { kind: '', text: '' };
+
+/** kind: '' 正常 | 'loading' 正在匹配 | 'none' 没找到 */
+function setLyricsPlaceholder(kind, text) {
+  lyricsPlaceholder = { kind: kind || '', text: text || '' };
+  if (!player.lines.length) buildLyricDom();
+}
+
+function createLyricsPlaceholder() {
+  const loading = lyricsPlaceholder.kind === 'loading';
+
+  const wrap = document.createElement('div');
+  wrap.className = `lyrics-empty${loading ? ' loading' : ''}`;
+
+  const icon = document.createElement('div');
+  icon.className = 'le-icon';
+  icon.textContent = loading ? '⋯' : '♪';
+  wrap.appendChild(icon);
+
+  const title = document.createElement('div');
+  title.className = 'le-title';
+  title.textContent = loading ? '正在匹配歌词…' : '暂无歌词';
+  wrap.appendChild(title);
+
+  const sub = document.createElement('div');
+  sub.className = 'le-sub';
+  sub.textContent = lyricsPlaceholder.text || (loading
+    ? '正在去 QQ 音乐找这首歌的歌词'
+    : '这首歌没有找到可用的歌词');
+  wrap.appendChild(sub);
+
+  if (!loading) {
+    const btn = document.createElement('button');
+    btn.className = 'le-btn';
+    btn.textContent = '手动搜索歌词';
+    btn.addEventListener('click', openSearch);
+    wrap.appendChild(btn);
+  }
+
+  return wrap;
+}
+
 function buildLyricDom() {
   const box = $('lyricsInner');
   box.innerHTML = '';
   lyricDom.lines = [];
   lyricDom.words = [];
   player.activeIndex = -1;
+
+  // 没有歌词时给个明确交代，而不是留一片空白
+  if (!player.lines.length) {
+    box.appendChild(createLyricsPlaceholder());
+    return;
+  }
 
   player.lines.forEach((line, index) => {
     const el = document.createElement('div');
@@ -352,6 +423,7 @@ function buildLyricDom() {
 /** 换一份歌词（演示歌词或 QQ 音乐的都走这里） */
 function setLyrics(lines, duration) {
   player.lines = lines || [];
+  if (player.lines.length) lyricsPlaceholder = { kind: '', text: '' };   // 有歌词了，空状态作废
 
   const last = player.lines.length ? player.lines[player.lines.length - 1].time : 0;
   player.lyricDuration = Number(duration) > 0 ? Number(duration) : Math.max(30, Math.round(last + 7));
