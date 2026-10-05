@@ -75,8 +75,33 @@ ipcMain.handle('overlay:update-settings', (_e, patch) => {
 
 /* 渲染进程启动时会问登录态，这里回「未登录」即可 */
 ipcMain.handle('qq:session', () => ({ loggedIn: false, uin: '', hasKey: false }));
-/* 搜索结果回空列表：正好模拟「换到一首匹配不到歌词的歌」 */
-ipcMain.handle('qq:search', () => ({ ok: true, songs: [] }));
+/*
+ * 搜索结果默认回空列表（模拟「换到一首匹配不到歌词的歌」）。
+ * 但查询里带 BINDME 时回一首有歌词的假曲目，用来测歌词绑定，
+ * 顺便数一下搜索被调用了几次 —— 绑定过之后就不该再搜了。
+ *
+ * 注意标题要和测试用的本地曲目一致：pickBestMatch 要求标题高度吻合，
+ * 对不上的话会被判成「没找到足够接近的版本」，根本走不到绑定那一步。
+ */
+const BIND_SONG = {
+  mid: 'bind-001', songMid: 'bind-001',
+  title: 'BINDME 测试曲', artist: '测试', album: '', duration: 200,
+};
+let qqSearchCalls = 0;
+
+ipcMain.handle('qq:search', (_e, keyword) => {
+  if (String(keyword || '').includes('BINDME')) {
+    qqSearchCalls += 1;
+    return { ok: true, songs: [BIND_SONG] };
+  }
+  return { ok: true, songs: [] };
+});
+
+ipcMain.handle('qq:load', () => ({
+  ok: true,
+  track: BIND_SONG,
+  lyric: { lrc: '[00:00.00]绑定第一句\n[00:03.00]绑定第二句', hasWordTiming: false },
+}));
 
 /* 歌单：测试期间不落盘，也不读真实歌单（免得跑测试改到用户的数据） */
 ipcMain.handle('playlist:load', () => ({ playMode: 'list', items: [] }));
@@ -719,6 +744,145 @@ async function testLyricOffset() {
   });
 }
 
+/**
+ * 本地曲目的歌词绑定。
+ * 核心是两件事：自动匹配成功后要记下来；记下来之后**不该再去搜**（省掉那一两秒）。
+ * 所以这里直接数 qq:search 的调用次数 —— 比断言界面状态可靠得多。
+ */
+async function testLyricBind() {
+  await playerWin.webContents.executeJavaScript(`
+    (function () {
+      playlist.items = [];
+      playlist.selected.clear();
+      lyricCache.clear();
+      addPlaylistItems([localToItem({
+        path: 'C:/bind/BINDME 测试曲.mp3', url: 'file:///C:/bind/a.mp3',
+        title: 'BINDME 测试曲', artist: '测试',
+      })]);
+      return true;
+    })()
+  `);
+
+  // 第一次播放：没有绑定 -> 走自动匹配 -> 成功后应当记下绑定
+  await playerWin.webContents.executeJavaScript(`playIndex(0)`);
+  await sleep(1600);
+
+  const first = await playerWin.webContents.executeJavaScript(`
+    (function () {
+      var it = playlist.items[0];
+      return {
+        bound: it.lyricBind ? it.lyricBind.mid : '',
+        boundTitle: it.lyricBind ? it.lyricBind.title : '',
+        lines: player.lines.length,
+        hasBindButton: Boolean(document.querySelector('.pl-item .pl-bind')),
+        bindButtonActive: Boolean(document.querySelector('.pl-item .pl-bind.bound')),
+      };
+    })()
+  `);
+  const searchAfterFirst = qqSearchCalls;
+
+  results.push({
+    name: 'K1. 自动匹配成功后记下歌词绑定',
+    ok: first.bound === 'bind-001' && first.lines === 2,
+    detail: `绑定到 mid=${first.bound || '（空）'}《${first.boundTitle}》，歌词 ${first.lines} 句`,
+  });
+
+  results.push({
+    name: 'K2. 歌单行出现「词」按钮并标为已绑定',
+    ok: first.hasBindButton && first.bindButtonActive,
+    detail: `按钮存在=${first.hasBindButton}，已绑定样式=${first.bindButtonActive}`,
+  });
+
+  // 第二次播放：已有绑定 -> 直接用，不该再搜一次
+  // 顺便把主进程收到的歌词清空，好验证「绑定这条路径也会推歌词给悬浮窗」
+  state.lines = [];
+  await playerWin.webContents.executeJavaScript(`playIndex(0)`);
+  await sleep(1400);
+  const searchAfterSecond = qqSearchCalls;
+  const publishedLines = state.lines.length;
+
+  results.push({
+    name: 'K3. 有绑定后不再搜索（省掉那一两秒）',
+    ok: searchAfterSecond === searchAfterFirst && searchAfterFirst === 1,
+    detail: `第一次播放搜索 ${searchAfterFirst} 次，第二次播放后累计 ${searchAfterSecond} 次（期望都是 1）`,
+  });
+
+  results.push({
+    name: 'K4. 绑定这条路径也会把歌词推给悬浮窗',
+    ok: publishedLines === 2,
+    detail: `主进程收到 ${publishedLines} 句歌词（期望 2，为 0 说明漏了 publish）`,
+  });
+
+  // 绑定模式的横幅 + 搜索栏预填
+  const banner = await playerWin.webContents.executeJavaScript(`
+    (function () {
+      document.getElementById('searchInput').value = '';
+      enterBindMode(playlist.items[0]);
+      var shown = !document.getElementById('bindBanner').classList.contains('hidden');
+      var name = document.getElementById('bindTargetName').textContent;
+      var hasUnbind = !document.getElementById('btnBindUnbind').classList.contains('hidden');
+      var prefilled = document.getElementById('searchInput').value;
+      exitBindMode();
+      var hiddenAgain = document.getElementById('bindBanner').classList.contains('hidden');
+      return { shown: shown, name: name, hasUnbind: hasUnbind, prefilled: prefilled, hiddenAgain: hiddenAgain };
+    })()
+  `);
+
+  results.push({
+    name: 'K5. 绑定模式横幅正确显示目标曲目',
+    ok: banner.shown && banner.name === 'BINDME 测试曲' && banner.hasUnbind && banner.hiddenAgain,
+    detail: `显示=${banner.shown}，目标「${banner.name}」，有取消绑定按钮=${banner.hasUnbind}，退出后隐藏=${banner.hiddenAgain}`,
+  });
+
+  results.push({
+    name: 'K6. 进绑定模式时自动把曲目名填进搜索栏',
+    ok: banner.prefilled.includes('BINDME 测试曲'),
+    detail: `搜索栏内容 =「${banner.prefilled}」（期望含曲目名）`,
+  });
+
+  // 从歌单点「词」进绑定模式时，搜索面板必须真的盖到最上面
+  const panels = await playerWin.webContents.executeJavaScript(`
+    (function () {
+      openPlaylist();
+      var playlistWasOpen = document.getElementById('playlistPanel').classList.contains('open');
+
+      enterBindMode(playlist.items[0]);
+
+      var r = {
+        playlistWasOpen: playlistWasOpen,
+        searchOpen: document.getElementById('searchPanel').classList.contains('open'),
+        playlistStillOpen: document.getElementById('playlistPanel').classList.contains('open'),
+        settingsOpen: document.getElementById('settings').classList.contains('open'),
+      };
+      exitBindMode();
+      closeSearch();
+      return r;
+    })()
+  `);
+
+  results.push({
+    name: 'K7. 点「词」后搜索面板真的切到最上层',
+    ok: panels.playlistWasOpen && panels.searchOpen
+      && !panels.playlistStillOpen && !panels.settingsOpen,
+    detail: `进入前歌单开着=${panels.playlistWasOpen}；进入后搜索=${panels.searchOpen}、`
+      + `歌单仍开着=${panels.playlistStillOpen}、样式面板=${panels.settingsOpen}（后两个期望 false）`,
+  });
+
+  // 从歌单删掉这首 -> 绑定和它独占的歌词缓存都该消失
+  const removed = await playerWin.webContents.executeJavaScript(`
+    (function () {
+      removePlaylistItems([playlist.items[0].id]);
+      return { items: playlist.items.length, cache: lyricCache.size };
+    })()
+  `);
+
+  results.push({
+    name: 'K8. 从歌单删掉曲目时一并解绑并释放歌词缓存',
+    ok: removed.items === 0 && removed.cache === 0,
+    detail: `剩余 ${removed.items} 首，歌词缓存 ${removed.cache} 条（期望都是 0）`,
+  });
+}
+
 async function run() {
   const { workArea } = screen.getPrimaryDisplay();
 
@@ -771,6 +935,7 @@ async function run() {
   await testPlaylistBasics();
   await testPlayModes();
   await testLyricOffset();
+  await testLyricBind();
 
   console.log('\n================ 回归测试结果 ================');
   for (const r of results) {

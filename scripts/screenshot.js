@@ -109,7 +109,9 @@ ipcMain.handle('playlist:load', () => ({
     { id: 'qq:001', kind: 'qq', mid: '001', title: '晴 天', artist: '周杰伦', album: '叶惠美', duration: 269, cover: state.track ? state.track.cover : '' },
     { id: 'local:002', kind: 'local', path: 'D:/music/002.mp3', url: 'file:///D:/music/002.mp3', title: '夜曲', artist: '周杰伦', album: '十一月的萧邦', duration: 227 },
     { id: 'qq:003', kind: 'qq', mid: '003', title: 'TIAN TIAN', artist: 'Mili', album: 'TIAN TIAN', duration: 214 },
-    { id: 'local:004', kind: 'local', path: 'D:/music/004.flac', url: 'file:///D:/music/004.flac', title: 'SAIKAI', artist: 'Mili', album: 'SAIKAI', duration: 198 },
+    { id: 'local:004', kind: 'local', path: 'D:/music/004.flac', url: 'file:///D:/music/004.flac', title: 'SAIKAI', artist: 'Mili', album: 'SAIKAI', duration: 198,
+      // 演示「已绑定歌词」的样子（截图用）
+      lyricBind: { mid: 'q004', songMid: 'q004', title: 'SAIKAI', artist: 'Mili', album: 'SAIKAI' } },
     { id: 'qq:005', kind: 'qq', mid: '005', title: 'Fly, My Wings', artist: 'Mili', album: 'Fly, My Wings', duration: 245 },
     { id: 'local:006', kind: 'local', path: 'D:/music/006.mp3', url: 'file:///D:/music/006.mp3', title: 'Through Patches of Violet', artist: 'Mili', album: '', duration: 233 },
   ],

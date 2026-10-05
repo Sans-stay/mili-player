@@ -321,7 +321,20 @@ async function hydrateLocalCovers() {
     const byPath = new Map(results.map((r) => [r.path, r.cover]));
     for (const item of originalItemsById(batch)) {
       const cover = byPath.get(item.path);
-      if (cover) { item.cover = cover; filled += 1; }
+      if (!cover) continue;
+
+      item.cover = cover;
+      filled += 1;
+
+      /*
+       * 如果正在放的就是这一首，把封面同步到当前曲目上。
+       * 从歌单载入的曲目在启动时是没有封面的（存盘时会剥掉），
+       * 不等回填就播放的话封面会一直是空的。
+       */
+      if (!player.track.cover && player.track.id && player.track.id === item.path) {
+        player.track.cover = cover;
+        initTrack();
+      }
     }
   }
 
@@ -371,6 +384,22 @@ const currentItem = () => (player.queueIndex >= 0 && player.queueIndex < playlis
   ? playlist.items[player.queueIndex]
   : null);
 
+/**
+ * 本地曲目的播放地址。
+ * 正常情况下 localToItem 已经写好了 url；万一老数据里缺这个字段，
+ * audio.src 会被设成字符串 "undefined"，表现就是「一播放就报错」。
+ * 所以这里从 path 兜一个 file:// 出来。
+ */
+function itemUrl(item) {
+  if (item.url) return item.url;
+  if (!item.path) return '';
+
+  const normalized = String(item.path).replace(/\\/g, '/').replace(/^\/+/, '');
+  const fallback = `file:///${normalized}`;
+  console.warn('[mili] 歌单项缺少 url，已用 path 兜底：', fallback);
+  return fallback;
+}
+
 /** 追加进歌单，自动跳过已经在里面的。返回真正加进去的条数 */
 function addPlaylistItems(items) {
   const existing = new Set(playlist.items.map((it) => it.id));
@@ -417,6 +446,7 @@ function removePlaylistItems(ids) {
 
   for (const id of doomed) playlist.selected.delete(id);
   playlist.history = playlist.history.filter((id) => !doomed.has(id));
+  pruneLyricCache();          // 被删掉的曲目若没人再引用它的歌词，缓存一起丢掉
 
   renderPlaylist();
   savePlaylistSoon();
@@ -496,9 +526,10 @@ async function playIndex(index) {
 
 /** 本地文件：直接喂给 <audio>，再后台去匹配歌词 */
 async function playLocalItem(item, index) {
-  audioUrl = item.url;
+  const url = itemUrl(item);
+  audioUrl = url;
   audioKind = 'local';
-  audio.src = item.url;
+  audio.src = url;
   audio.volume = player.muted ? 0 : player.volume;
   audio.muted = player.muted;
 
@@ -526,13 +557,16 @@ async function playLocalItem(item, index) {
    * 少了这一步，悬浮窗就只会在匹配成功时才收到新歌词（publish 只在成功分支里），
    * 匹配失败时它会一直渲染上一首歌的字幕。
    */
-  await publish();
+  await publishSafe();
 
   play();                                  // play() 里会调用 audio.play()
   toast(`正在播放：${item.title}（${index + 1}/${playlist.items.length}）`);
 
-  autoMatchLyrics(item).catch((err) => {   // 后台去 QQ 音乐配歌词
-    console.warn('[mili] 匹配歌词时出错：', err && err.message ? err.message : err);
+  // 有绑定就用绑定的那份（配得对，也省掉搜索那一步）；没有才去自动匹配。
+  // 自动匹配成功后会自己记下绑定，所以只有第一次需要联网搜。
+  const lyrics = item.lyricBind ? applyBoundLyrics(item) : autoMatchLyrics(item);
+  lyrics.catch((err) => {
+    console.warn('[mili] 取歌词时出错：', err && err.message ? err.message : err);
   });
 }
 
@@ -582,8 +616,68 @@ function pickBestMatch(songs, meta) {
   return bestScore >= 3 ? best : null;
 }
 
-/** 取一首 QQ 音乐的歌词并解析；失败返回 null */
+/*
+ * 本地曲目 → QQ 音乐曲目的歌词绑定。
+ * ---------------------------------------------------------------
+ * 绑定挂在**歌单项自己身上**（item.lyricBind），只存 mid 和展示用的几个字段，
+ * 几十字节而已。这样做有个好处：从歌单里删掉这首，绑定自然就没了，
+ * 不用再去别处维护一张「谁绑了谁」的表。
+ *
+ * 歌词本身不落盘，只在本次运行内缓存 —— 换个歌单文件大小基本没变。
+ */
+const lyricCache = new Map();     // mid -> hit
+
+const bindingToSong = (bind) => ({
+  mid: bind.mid,
+  songMid: bind.songMid || bind.mid,
+  title: bind.title || '',
+  artist: bind.artist || '',
+  album: bind.album || '',
+});
+
+/** 歌单里还有多少项引用这个 mid */
+function lyricBindCount(mid) {
+  return playlist.items.filter((it) => it.lyricBind && it.lyricBind.mid === mid).length;
+}
+
+/** 丢掉已经没人引用的歌词缓存（删歌 / 解绑时调） */
+function pruneLyricCache() {
+  for (const mid of [...lyricCache.keys()]) {
+    if (!lyricBindCount(mid)) lyricCache.delete(mid);
+  }
+}
+
+/** 绑定或换绑 */
+function setLyricBind(item, song) {
+  if (!item || item.kind !== 'local') return;
+  item.lyricBind = {
+    mid: song.mid,
+    songMid: song.songMid || song.mid,
+    title: song.title || '',
+    artist: song.artist || '',
+    album: song.album || '',
+  };
+  savePlaylistSoon();
+  renderPlaylist();
+}
+
+/** 解绑，并把它独占的歌词缓存一起丢掉 */
+function clearLyricBind(item) {
+  if (!item || !item.lyricBind) return;
+  const { mid } = item.lyricBind;
+  delete item.lyricBind;
+  if (!lyricBindCount(mid)) lyricCache.delete(mid);
+  savePlaylistSoon();
+  renderPlaylist();
+}
+
+/** 取一首 QQ 音乐的歌词并解析；失败返回 null。同一个 mid 本次运行内只取一次 */
 async function fetchLyrics(song) {
+  if (!song || !song.mid) return null;
+
+  const cached = lyricCache.get(song.mid);
+  if (cached) return cached;
+
   const res = await window.mili.loadQQSong(song);
   if (!res.ok) return null;
 
@@ -595,7 +689,46 @@ async function fetchLyrics(song) {
   if (lyric.trans) {
     try { attachTranslation(parsed.lines, parse(lyric.trans).lines); } catch { /* 忽略 */ }
   }
-  return { parsed, track: res.track, hasWordTiming: Boolean(lyric.hasWordTiming) };
+
+  const hit = { parsed, track: res.track, hasWordTiming: Boolean(lyric.hasWordTiming) };
+  lyricCache.set(song.mid, hit);
+  return hit;
+}
+
+/** 把一份歌词挂到界面上（绑定命中和自动匹配成功都走这里） */
+function applyLyricHit(hit) {
+  setLyrics(hit.parsed.lines, hit.track.duration || player.lyricDuration);
+  if (!player.track.cover && hit.track.cover) {
+    player.track.cover = hit.track.cover;
+    initTrack();
+  }
+  maybeAutoTheme(hit.track, '本地文件匹配到的歌曲');
+}
+
+/** 用已绑定的 mid 直接取歌词 —— 省掉搜索那一步，而且保证配得对 */
+async function applyBoundLyrics(item) {
+  const bind = item.lyricBind;
+  if (!bind) return false;
+
+  setLyricsPlaceholder('loading', `正在取《${bind.title || bind.mid}》的歌词…`);
+  const hit = await fetchLyrics(bindingToSong(bind));
+
+  if (!hit) {
+    setLyricsPlaceholder('none', '绑定的那份歌词取不到了，可以重新绑定');
+    toast(`绑定的《${bind.title || bind.mid}》取不到歌词，可以重新绑定`, 6000);
+    return false;
+  }
+
+  applyLyricHit(hit);
+  /*
+   * 这里必须 publish —— 悬浮窗的歌词是主进程广播过去的。
+   * 只更新本地界面的话，主窗口能看到歌词，但悬浮窗会一直停在
+   * playLocalItem 早先推的那次「无歌词」上，看起来就是「没有悬浮歌词」。
+   * （autoMatchLyrics 成功分支里有这句，绑定这条路径当初漏了。）
+   */
+  await publishSafe();
+  toast(`已用绑定的歌词：${bind.title}${hit.hasWordTiming ? '（逐字）' : ''}`);
+  return true;
 }
 
 /** 载入本地文件后，自动用「标题 + 艺术家」去 QQ 音乐配歌词 */
@@ -628,16 +761,17 @@ async function autoMatchLyrics(meta) {
     return;
   }
 
-  setLyrics(hit.parsed.lines, hit.track.duration || player.lyricDuration);
-  if (!player.track.cover && hit.track.cover) {
-    player.track.cover = hit.track.cover;
-    initTrack();
-  }
-  maybeAutoTheme(hit.track, '本地文件匹配到的歌曲');
-  await publish();
+  applyLyricHit(hit);
+  /*
+   * 自动匹配成功也记一笔绑定。
+   * 下次放这首就直接用这份歌词 —— 不用再搜一遍（省掉一两秒），
+   * 也不会因为搜索排序变化而忽然配成另一首。
+   */
+  setLyricBind(meta, hit.track);
+  await publishSafe();
   toast(`已匹配歌词：${hit.track.title} — ${hit.track.artist}` +
     (hit.hasWordTiming ? '（逐字）' : '（逐行，已自动细分到字）'));
-  console.log('[mili] 歌词匹配成功：', hit.track.title, hit.track.artist);
+  console.log('[mili] 歌词匹配成功并已记录绑定：', hit.track.title, hit.track.artist);
 }
 
 async function openLocalFiles() {
@@ -1316,8 +1450,15 @@ function createPlaylistRow(item, index) {
   title.textContent = item.title;
   const sub = document.createElement('div');
   sub.className = 'pl-sub';
-  sub.textContent = [item.artist, item.kind === 'qq' ? 'QQ 音乐' : '本地']
-    .filter(Boolean).join(' · ');
+  if (item.kind === 'qq') {
+    sub.textContent = [item.artist, 'QQ 音乐'].filter(Boolean).join(' · ');
+  } else if (item.lyricBind) {
+    sub.textContent = [item.artist, `歌词绑定「${item.lyricBind.title}」`]
+      .filter(Boolean).join(' · ');
+    sub.classList.add('bound');
+  } else {
+    sub.textContent = [item.artist, '本地'].filter(Boolean).join(' · ');
+  }
   meta.appendChild(title);
   meta.appendChild(sub);
   main.appendChild(meta);
@@ -1327,6 +1468,18 @@ function createPlaylistRow(item, index) {
     playIndex(index);
   });
   row.appendChild(main);
+
+  // 本地曲目才有「绑定歌词」：自动配错时手动指定，顺便记下来免得下次再搜
+  if (item.kind === 'local') {
+    const bind = document.createElement('button');
+    bind.className = `pl-bind${item.lyricBind ? ' bound' : ''}`;
+    bind.textContent = '词';
+    bind.title = item.lyricBind
+      ? `歌词已绑定《${item.lyricBind.title}》—— 点击换绑`
+      : '绑定 QQ 音乐歌词（自动配错时用）';
+    bind.addEventListener('click', () => enterBindMode(item));
+    row.appendChild(bind);
+  }
 
   const time = document.createElement('span');
   time.className = 'pl-time';
@@ -1377,6 +1530,20 @@ function bindPlaylist() {
 
   document.querySelectorAll('#segPlayMode button').forEach((btn) => {
     btn.addEventListener('click', () => setPlayMode(btn.dataset.mode));
+  });
+
+  // 绑定模式横幅上的两个按钮
+  $('btnBindCancel').addEventListener('click', () => {
+    exitBindMode();
+    closeSearch();
+  });
+  $('btnBindUnbind').addEventListener('click', () => {
+    const item = bindTargetItem();
+    if (!item) return;
+    clearLyricBind(item);
+    toast(`已取消《${item.title}》的歌词绑定`);
+    exitBindMode();
+    openPlaylist();
   });
 
   $('plSelectAll').addEventListener('change', (event) => {
@@ -1470,16 +1637,94 @@ async function loadPlaylist() {
   hydrateLocalCovers().catch(() => {});
 }
 
+/* --------------------------------------------------- 歌词绑定模式 */
+
+/*
+ * 「给某个本地曲目挑一份歌词」的模式：
+ * 从歌单行点「词」进入，跳到搜索面板，顶部挂一条横幅说明正在给谁选。
+ * 这时**点搜索结果的歌名 = 绑定**，而不是平常的「只载入歌词」——
+ * 同一个手势，含义由当前是不是在绑定模式决定，不用再塞第四个按钮进那一行。
+ */
+let bindTargetId = '';
+
+const bindTargetItem = () => playlist.items.find((it) => it.id === bindTargetId) || null;
+
+function enterBindMode(item) {
+  if (!item || item.kind !== 'local') return;
+
+  bindTargetId = item.id;
+  $('bindBanner').classList.remove('hidden');
+  $('bindTargetName').textContent = item.title;
+  $('btnBindUnbind').classList.toggle('hidden', !item.lyricBind);
+
+  openSearch();
+  setSearchStatus('搜索这首歌，点它的歌名即可绑定');
+  toast(`正在为《${item.title}》挑歌词：搜到后点歌名`, 6000);
+
+  /*
+   * 曲目名先填进搜索栏并直接搜一次 —— 大多数情况下这正是要找的那首，
+   * 用户只需要在结果里点一下，省掉手打一遍。
+   * 「未知艺术家」是兜底文案，带上它只会污染搜索结果，所以跳过。
+   */
+  const artist = item.artist && item.artist !== '未知艺术家' ? item.artist : '';
+  const keyword = [item.title, artist].filter(Boolean).join(' ').trim();
+  if (keyword) {
+    $('searchInput').value = keyword;
+    doSearch().catch((err) => console.warn('[mili] 绑定模式自动搜索失败：', err.message));
+  }
+}
+
+function exitBindMode() {
+  bindTargetId = '';
+  $('bindBanner').classList.add('hidden');
+}
+
+/** 绑定模式里点了某条搜索结果 */
+async function bindChosenSong(song) {
+  const item = bindTargetItem();
+  if (!item) { exitBindMode(); return; }
+
+  setSearchStatus(`正在确认《${song.title}》有没有歌词…`);
+  const hit = await fetchLyrics(song);
+
+  if (!hit) {
+    setSearchStatus(`《${song.title}》没有可用歌词，换一首试试`, true);
+    return;
+  }
+
+  setLyricBind(item, hit.track);
+  setSearchStatus('');
+  toast(`《${item.title}》的歌词已绑定到《${song.title}》`);
+
+  // 正在放的就是这首的话，立刻把歌词换过来，不用等下一首
+  const playing = currentItem();
+  if (playing && playing.id === item.id) {
+    applyLyricHit(hit);
+    await publishSafe();
+  }
+
+  exitBindMode();
+  openPlaylist();
+}
+
 /* --------------------------------------------------- QQ 音乐搜索面板 */
 
 function openSearch() {
+  /*
+   * 三个面板都是铺满窗口、同一个 z-index，谁在后面谁盖住谁。
+   * 所以每次打开一个都必须把另外两个关掉 —— 之前这里漏了歌单面板，
+   * 结果从歌单点「词」进绑定模式时，搜索面板虽然 open 了却被歌单盖着，
+   * 看起来就像「点了没反应」。
+   */
   $('settings').classList.remove('open');
+  $('playlistPanel').classList.remove('open');
   $('searchPanel').classList.add('open');
   setTimeout(() => $('searchInput').focus(), 220);
 }
 
 function closeSearch() {
   $('searchPanel').classList.remove('open');
+  exitBindMode();          // 收起搜索就退出绑定模式，免得下次打开还停在那
 }
 
 /** 搜索结果一行 =「点整行只换歌词」+「右侧 ▶ 在线播放」两个动作。
@@ -1529,7 +1774,11 @@ function renderResults(songs) {
     time.textContent = formatTime(song.duration);
     main.appendChild(time);
 
-    main.addEventListener('click', () => loadQQSong(song, row));
+    main.addEventListener('click', () => {
+      // 绑定模式下，点歌名的含义变成「就用这份歌词」
+      if (bindTargetId) bindChosenSong(song);
+      else loadQQSong(song, row);
+    });
     row.appendChild(main);
 
     // 右侧：在线播放
@@ -1692,7 +1941,7 @@ async function loadQQSong(song, item) {
       : '只载入了歌词 —— 登录 QQ 音乐后即可在线播放');
   }
 
-  await publish();
+  await publishSafe();
   closeSearch();
   setSearchStatus('');
   console.log(`[mili] 已载入《${hit.track.title}》：${hit.parsed.lines.length} 句，` +
@@ -1716,12 +1965,12 @@ async function playQQSong(song) {
 
   if (!await attachOnlineAudio(song)) {
     pause();
-    await publish();
+    await publishSafe();
     return false;
   }
 
   play();
-  await publish();
+  await publishSafe();
   return true;
 }
 
@@ -1889,13 +2138,35 @@ function bindAudio() {
     const err = audio.error;
     const kinds = { 1: '加载被中止', 2: '网络错误', 3: '解码失败', 4: '格式不支持或地址无效' };
     const what = (err && kinds[err.code]) || '未知错误';
-    console.warn('[mili] 音频错误：', err && err.code, what, '| src =', String(audio.currentSrc || audio.src).slice(0, 80));
-    toast(`播放失败：${what}` +
-      (audioKind === 'online' ? '（在线地址可能已失效，再点一次这首歌重试）' : ''));
+    const src = String(audio.currentSrc || audio.src || '');
+
+    console.warn('[mili] 音频错误：', err && err.code, what,
+      '| kind =', audioKind, '| src =', src);
+
+    // 本地文件报错时把路径解出来 —— 多数情况是文件被挪走或删了
+    const localPath = decodeURIComponent(src.replace(/^file:\/\/\//, ''));
+    const hint = audioKind === 'online'
+      ? '（在线地址可能已失效，再点一次这首歌重试）'
+      : `（本地文件可能被移动或删除了：${localPath}）`;
+    toast(`播放失败：${what}${hint}`, 9000);
   });
 }
 
 /* --------------------------------------------------------------- 启动 */
+
+/*
+ * 推状态的「安全版」。
+ * publish() 里是 await ipcRenderer.invoke，主进程那边一旦抛异常，
+ * 这个 await 就会 reject —— 而它在 playLocalItem 里是排在 play() 前面的，
+ * 于是一次 IPC 失败会让整首歌**根本不出声**。播放不该被推状态连累。
+ */
+async function publishSafe() {
+  try {
+    await publish();
+  } catch (err) {
+    console.warn('[mili] 推送状态失败（不影响播放）：', err && err.message ? err.message : err);
+  }
+}
 
 async function publish() {
   await window.mili.publishTrack({
@@ -1915,7 +2186,7 @@ async function init() {
   bindDrop();
 
   await loadPlaylist();
-  await publish();
+  await publishSafe();
 
   const state = await window.mili.getState();
   window.MiliTheme.setCustom(state.themeRules || []);
