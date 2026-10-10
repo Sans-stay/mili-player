@@ -940,6 +940,53 @@ async function testPlayWithoutLyrics() {
   });
 }
 
+/**
+ * 「没找到歌词」时那个「手动搜索歌词」按钮：
+ * 打开搜索面板的同时要把当前曲目名填进输入框，省得用户再打一遍。
+ */
+async function testEmptyStateSearchButton() {
+  const r = await playerWin.webContents.executeJavaScript(`
+    (function () {
+      player.track = { title: '晴天', artist: '周杰伦' };
+      setLyrics([], 0);
+      setLyricsPlaceholder('none', '测试用文案');
+
+      document.getElementById('searchInput').value = '';
+      closeSearch();
+
+      var btn = document.querySelector('.le-btn');
+      if (!btn) return { ok: false, reason: '空状态里没有按钮' };
+      btn.click();
+
+      var out = {
+        ok: true,
+        searchOpen: document.getElementById('searchPanel').classList.contains('open'),
+        value: document.getElementById('searchInput').value,
+      };
+      closeSearch();
+      return out;
+    })()
+  `);
+
+  results.push({
+    name: 'M1. 空状态的「手动搜索歌词」会带上歌名并打开搜索',
+    ok: r.ok && r.searchOpen && r.value.includes('晴天'),
+    detail: r.ok
+      ? `搜索面板打开=${r.searchOpen}，输入框 =「${r.value}」（期望含曲目名）`
+      : r.reason,
+  });
+
+  // 「未知艺术家」是本地没标签时的兜底文案，不该被当成艺术家拼进搜索词
+  const fallback = await playerWin.webContents.executeJavaScript(
+    `keywordFor({ title: '某首歌', artist: '未知艺术家' })`,
+  );
+  results.push({
+    name: 'M2. 搜索词跳过「未知艺术家」这种兜底文案',
+    ok: fallback === '某首歌',
+    detail: `keywordFor({title:'某首歌', artist:'未知艺术家'}) = 「${fallback}」（期望「某首歌」）`,
+  });
+}
+
 async function run() {
   const { workArea } = screen.getPrimaryDisplay();
 
@@ -994,6 +1041,7 @@ async function run() {
   await testLyricOffset();
   await testLyricBind();
   await testPlayWithoutLyrics();
+  await testEmptyStateSearchButton();
 
   console.log('\n================ 回归测试结果 ================');
   for (const r of results) {

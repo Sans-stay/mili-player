@@ -873,7 +873,8 @@ function createLyricsPlaceholder() {
     const btn = document.createElement('button');
     btn.className = 'le-btn';
     btn.textContent = '手动搜索歌词';
-    btn.addEventListener('click', openSearch);
+    // 打开搜索面板时自动填好这首歌的名字并搜一次，省得用户再手打
+    btn.addEventListener('click', () => searchFor(player.track));
     wrap.appendChild(btn);
   }
 
@@ -1657,21 +1658,10 @@ function enterBindMode(item) {
   $('bindTargetName').textContent = item.title;
   $('btnBindUnbind').classList.toggle('hidden', !item.lyricBind);
 
-  openSearch();
-  setSearchStatus('搜索这首歌，点它的歌名即可绑定');
-  toast(`正在为《${item.title}》挑歌词：搜到后点歌名`, 6000);
-
-  /*
-   * 曲目名先填进搜索栏并直接搜一次 —— 大多数情况下这正是要找的那首，
-   * 用户只需要在结果里点一下，省掉手打一遍。
-   * 「未知艺术家」是兜底文案，带上它只会污染搜索结果，所以跳过。
-   */
-  const artist = item.artist && item.artist !== '未知艺术家' ? item.artist : '';
-  const keyword = [item.title, artist].filter(Boolean).join(' ').trim();
-  if (keyword) {
-    $('searchInput').value = keyword;
-    doSearch().catch((err) => console.warn('[mili] 绑定模式自动搜索失败：', err.message));
-  }
+  // 打开搜索面板 + 预填曲目名 + 直接搜一次（和「手动搜索歌词」共用同一套）
+  searchFor(item);
+  if (!keywordFor(item)) setSearchStatus('输入关键词搜索，点歌名即可绑定');
+  toast(`正在为《${item.title}》挑歌词：点搜索结果里的歌名即可绑定`, 6000);
 }
 
 function exitBindMode() {
@@ -1725,6 +1715,33 @@ function openSearch() {
 function closeSearch() {
   $('searchPanel').classList.remove('open');
   exitBindMode();          // 收起搜索就退出绑定模式，免得下次打开还停在那
+}
+
+/**
+ * 把一首曲目拼成搜索词：「标题 + 艺术家」。
+ * 「未知艺术家」是本地文件没标签时的兜底文案，带上它只会污染搜索结果，所以跳过。
+ */
+function keywordFor(track) {
+  const src = track || {};
+  const artist = src.artist && src.artist !== '未知艺术家' ? src.artist : '';
+  return [src.title, artist].filter(Boolean).join(' ').trim();
+}
+
+/**
+ * 打开搜索面板，把关键词填进输入框并直接搜一次。
+ * 玩家点「手动搜索歌词」、或从歌单点「词」时都走这里 ——
+ * 大多数情况下曲目名就是要找的那首，用户只需要在结果里点一下。
+ */
+function searchFor(track) {
+  openSearch();
+
+  const keyword = keywordFor(track);
+  if (!keyword) return;                 // 没有可用信息就留空让用户自己打
+
+  $('searchInput').value = keyword;
+  doSearch().catch((err) => {
+    console.warn('[mili] 自动搜索失败：', err && err.message ? err.message : err);
+  });
 }
 
 /** 搜索结果一行 =「点整行只换歌词」+「右侧 ▶ 在线播放」两个动作。
