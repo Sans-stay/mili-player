@@ -15,6 +15,7 @@
     "test:online": "node scripts/start.js scripts/test-online.js",
     "test:presets": "node scripts/test-presets.js",
     "test:theme": "node scripts/test-theme.js",
+    "test:sources": "node scripts/test-sources.js",
     "testdata": "python scripts/make-testdata.py",
     "shot": "node scripts/start.js scripts/screenshot.js",
     "setup:electron": "powershell -ExecutionPolicy Bypass -File scripts/install-electron.ps1",

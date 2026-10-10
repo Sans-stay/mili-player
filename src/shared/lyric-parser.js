@@ -318,5 +318,90 @@
     return lines;
   }
 
-  return { parse, parseQrc, attachTranslation, extractQrcContent, findLineIndex, formatTime, tokenize, synthesizeWords };
+  /**
+   * 解析酷狗 KRC。
+   * ---------------------------------------------------------------
+   * 结构和 QRC 几乎一样，两个关键区别：
+   *   1. 逐字标签写在文字**前面**：`<偏移,时长,?>` + 文字（QRC 是文字 + `(起始,时长)`）
+   *   2. **字时间是相对行首的毫秒**，得加上行起始 —— QRC 那边是绝对值，
+   *      而界面是拿绝对播放时间去比对的，不加就会整行错位
+   * KRC 解出来后就是纯文本，没有 QRC 那层 XML 外壳。
+   */
+  function parseKrc(source, options) {
+    const opts = options || {};
+    const text = String(source || '');
+    const meta = { offset: 0 };
+    const lines = [];
+
+    const LINE_RE = /^\[(\d+),(\d+)\](.*)$/;
+    const META_RE = /^\[([a-zA-Z]+):(.*)\]$/;
+    const WORD_RE = /<(\d+),(\d+),(\d+)>/g;
+
+    for (const raw of text.split('\n')) {
+      const line = raw.replace(/\r$/, '');
+      if (!line) continue;
+
+      const metaHit = line.match(META_RE);
+      if (metaHit) {
+        const key = metaHit[1].toLowerCase();
+        if (key === 'offset') meta.offset = parseInt(metaHit[2], 10) || 0;
+        else meta[key] = metaHit[2];
+        continue;
+      }
+
+      const hit = line.match(LINE_RE);
+      if (!hit) continue;
+
+      const start = Number(hit[1]) / 1000;
+      const body = hit[3];
+
+      // 标签在前、文字在后：第 i 个标签的文字一直延伸到第 i+1 个标签之前
+      const words = [];
+      const tags = [...body.matchAll(WORD_RE)];
+      for (let i = 0; i < tags.length; i += 1) {
+        const tag = tags[i];
+        const textStart = tag.index + tag[0].length;
+        const textEnd = i + 1 < tags.length ? tags[i + 1].index : body.length;
+        const wordText = body.slice(textStart, textEnd);
+        if (!wordText) continue;
+
+        words.push({
+          text: wordText,
+          time: round(start + Number(tag[1]) / 1000),   // 相对 -> 绝对
+          dur: Number(tag[2]) / 1000,
+        });
+      }
+
+      const plain = words.map((w) => w.text).join('');
+      lines.push({
+        time: start,
+        text: plain,
+        translation: null,
+        words: words.length ? words : synthesizeWords(plain, start, start + 4),
+      });
+    }
+
+    const shift = (meta.offset || 0) / 1000 + (opts.offset || 0);
+    if (shift) {
+      for (const line of lines) {
+        line.time = round(Math.max(0, line.time + shift));
+        line.words = line.words.map((w) => ({ ...w, time: round(Math.max(0, w.time + shift)) }));
+      }
+    }
+
+    lines.sort((a, b) => a.time - b.time);
+    return { meta, lines };
+  }
+
+  return {
+    parse,
+    parseQrc,
+    parseKrc,
+    attachTranslation,
+    extractQrcContent,
+    findLineIndex,
+    formatTime,
+    tokenize,
+    synthesizeWords,
+  };
 });

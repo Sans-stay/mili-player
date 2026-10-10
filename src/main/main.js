@@ -800,6 +800,74 @@ ipcMain.handle('qq:checkPlayable', async (_e, song) => {
   };
 });
 
+/* ----------------------------------------------------------- 多音乐源 */
+
+/*
+ * 统一的「源」接口，渲染层只认 sourceId，不用管底下是谁。
+ * QQ 的实现在 sources/qq.js（只是包了原来的 qqmusic.js），
+ * 网易云、酷狗各自一份，互不影响 —— 以后加新源只要往 sources/index.js 注册。
+ */
+const sources = require('./sources');
+
+ipcMain.handle('source:list', () => sources.listSources());
+
+ipcMain.handle('source:search', async (_e, id, keyword) => {
+  try {
+    return { ok: true, songs: await sources.getSource(id).search(keyword) };
+  } catch (err) {
+    console.warn(`[mili] ${id} 搜索失败：`, err.message);
+    return { ok: false, error: err.message, songs: [] };
+  }
+});
+
+ipcMain.handle('source:load', async (_e, id, song) => {
+  const provider = sources.getSource(id || (song && song.source));
+  try {
+    const lyric = await provider.getLyric(song);
+    // lyric 为 null 表示这首歌确实没有歌词 —— 正常结果，不是错误
+    return { ok: true, track: { ...song, source: provider.id }, lyric: lyric || null };
+  } catch (err) {
+    console.warn(`[mili] ${provider.id} 取歌词失败：`, err.message);
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('source:playurl', async (_e, id, song) => {
+  const provider = sources.getSource(id || (song && song.source));
+
+  if (!provider.canPlay || typeof provider.getSongUrl !== 'function') {
+    return { ok: false, mid: song.mid, error: `${provider.label}目前只能取歌词，不支持在线播放` };
+  }
+
+  // QQ 那条链路已经跑通了（账号 cookie + 多 CDN 入口预检），原样复用
+  if (provider.id === 'qq') return resolvePlayUrl(song);
+
+  try {
+    const info = await provider.getSongUrl(song);
+    if (!info.ok) return { ...info, mid: song.mid };
+
+    // 其它源的地址也走本地代理：请求头可控，失败时能拿到真实状态码
+    const check = await audioProxy.preflight(info.url, qqSession);
+    console.log(`[mili] 播放地址预检 ${song.title || song.mid}（${provider.label}）：`
+      + `${check.ok ? '通过' : '失败'} [${(check.tried || []).join(' | ')}]`);
+
+    if (!check.ok) return { ok: false, mid: song.mid, error: check.error, detail: check.tried };
+
+    return {
+      ok: true,
+      mid: song.mid,
+      quality: info.quality,
+      ext: info.ext,
+      url: audioProxy.proxyUrl(check.url),
+      upstream: check.url,
+      contentType: check.contentType,
+    };
+  } catch (err) {
+    console.warn('[mili] 取播放地址失败：', err.message);
+    return { ok: false, mid: song.mid, error: err.message };
+  }
+});
+
 /* --------------------------------------------------------- 生命周期 */
 
 if (!app.requestSingleInstanceLock()) {

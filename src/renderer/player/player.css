@@ -812,6 +812,39 @@ input[type="color"]::-webkit-color-swatch {
 }
 .pl-sub.bound { color: rgba(var(--lyric-rgb), 0.85); }
 
+/* 音乐源切换器 */
+.source-picker {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+.source-picker button {
+  flex: 1;
+  padding: 6px 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+.source-picker button:hover { color: rgba(255, 255, 255, 0.9); }
+.source-picker button.on {
+  border-color: rgba(var(--lyric-rgb), 0.65);
+  background: rgba(var(--lyric-rgb), 0.16);
+  color: var(--lyric);
+  font-weight: 600;
+}
+
+/* 不可播放的源，搜索结果里的 ▶ 要禁用 */
+.result-play:disabled {
+  opacity: 0.3;
+  cursor: default;
+  transform: none;
+}
+
 /* 搜索面板顶部的「绑定模式」横幅 */
 .bind-banner {
   display: flex;

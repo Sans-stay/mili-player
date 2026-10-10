@@ -89,10 +89,17 @@ const BIND_SONG = {
 };
 let qqSearchCalls = 0;
 
-ipcMain.handle('qq:search', (_e, keyword) => {
+/* 音乐源列表：测试里给三个源，酷狗故意标成不可播放 */
+ipcMain.handle('source:list', () => [
+  { id: 'qq', label: 'QQ 音乐', canPlay: true },
+  { id: 'netease', label: '网易云', canPlay: true },
+  { id: 'kugou', label: '酷狗', canPlay: false },
+]);
+
+ipcMain.handle('source:search', (_e, sourceId, keyword) => {
   if (String(keyword || '').includes('BINDME')) {
     qqSearchCalls += 1;
-    return { ok: true, songs: [BIND_SONG] };
+    return { ok: true, songs: [{ ...BIND_SONG, source: sourceId }] };
   }
   return { ok: true, songs: [] };
 });
@@ -103,15 +110,15 @@ const NOLYRIC_SONG = {
   title: '纯音乐测试', artist: '测试', album: '', duration: 120,
 };
 
-ipcMain.handle('qq:load', (_e, song) => {
-  // 纯音乐：既没有 qrc 也没有 lrc
+ipcMain.handle('source:load', (_e, sourceId, song) => {
+  // 纯音乐：既没有 qrc 也没有 lrc -> 主进程回 lyric: null
   if (song && song.mid === NOLYRIC_SONG.mid) {
-    return { ok: true, track: NOLYRIC_SONG, lyric: {} };
+    return { ok: true, track: { ...NOLYRIC_SONG, source: sourceId }, lyric: null };
   }
   return {
     ok: true,
-    track: BIND_SONG,
-    lyric: { lrc: '[00:00.00]绑定第一句\n[00:03.00]绑定第二句', hasWordTiming: false },
+    track: { ...BIND_SONG, source: sourceId },
+    lyric: { format: 'lrc', content: '[00:00.00]绑定第一句\n[00:03.00]绑定第二句', trans: '', hasWordTiming: false },
   };
 });
 
@@ -121,8 +128,9 @@ ipcMain.handle('playlist:save', (_e, payload) => ({ ok: true, count: (payload.it
 ipcMain.handle('audio:pickFolder', () => ({ ok: true, files: [], truncated: false }));
 ipcMain.handle('qq:login', () => ({ ok: false, canceled: true, error: '测试宿主未接入登录' }));
 ipcMain.handle('qq:logout', () => ({ loggedIn: false, uin: '', hasKey: false }));
+
 /* 只有纯音乐那首能拿到播放地址，别的照旧回「未登录」，用来测取地址失败的分支 */
-ipcMain.handle('qq:playurl', (_e, song) => {
+ipcMain.handle('source:playurl', (_e, sourceId, song) => {
   if (song && song.mid === NOLYRIC_SONG.mid) {
     return {
       ok: true, mid: song.mid, quality: '320kbps',
@@ -987,6 +995,80 @@ async function testEmptyStateSearchButton() {
   });
 }
 
+/**
+ * 多源：播放和加歌单时，来源不能被写死成 QQ。
+ *
+ * 真出现过的 bug：playQQSong 里写死 `source: 'qq'`，于是播网易云的歌时
+ * player.track.source 变成 qq —— 徽标显示「QQ 音乐」是小事，
+ * 歌单里的在线项还会拿 QQ 的接口去取地址，直接放不出来。
+ */
+async function testSourceLabeling() {
+  const r = await playerWin.webContents.executeJavaScript(`
+    (async () => {
+      // 用「能拿到播放地址」的那首，source 标成网易云
+      await playQQSong({
+        source: 'netease', mid: 'nolyric-001', songMid: 'nolyric-001',
+        title: '网易云的歌', artist: '测试', duration: 120,
+      });
+
+      const badge = document.getElementById('badge').textContent;
+
+      // 歌单项：kind / source / id 都要跟着源走
+      const item = onlineToItem({ source: 'netease', mid: 'ne-777', title: '网易云的歌', artist: '测试' });
+
+      // 歌单行上的来源标签
+      playlist.items = [item];
+      renderPlaylist();
+      const sub = document.querySelector('.pl-item .pl-sub');
+
+      // 老数据兼容：早期只有 QQ 一种在线源，kind 写的是 'qq' 且没有 source
+      const legacy = { kind: 'qq', mid: 'old-1', title: '老数据' };
+
+      return {
+        trackSource: player.track.source,
+        badge: badge,
+        itemKind: item.kind,
+        itemSource: item.source,
+        itemId: item.id,
+        subText: sub ? sub.textContent : '(没有副标题)',
+        legacyOnline: isOnlineItem(legacy),
+        legacySource: itemSourceId(legacy),
+        legacyOnlineToItemId: onlineToItem({ source: 'kugou', mid: 'kg-1' }).id,
+      };
+    })()
+  `);
+
+  results.push({
+    name: 'N1. 播网易云的歌，曲目来源与徽标都是网易云',
+    ok: r.trackSource === 'netease' && r.badge === '网易云',
+    detail: `player.track.source=${r.trackSource}，徽标显示「${r.badge}」（期望都是网易云）`,
+  });
+
+  results.push({
+    name: 'N2. 歌单项带上源，id 前缀区分不同源',
+    ok: r.itemKind === 'online' && r.itemSource === 'netease' && r.itemId === 'netease:ne-777',
+    detail: `kind=${r.itemKind} source=${r.itemSource} id=${r.itemId}`,
+  });
+
+  results.push({
+    name: 'N3. 歌单行显示正确的来源标签',
+    ok: r.subText.includes('网易云'),
+    detail: `副标题 =「${r.subText}」（期望含「网易云」）`,
+  });
+
+  results.push({
+    name: 'N4. 旧的 kind:"qq" 歌单数据仍被当成在线曲目',
+    ok: r.legacyOnline === true && r.legacySource === 'qq',
+    detail: `isOnlineItem=${r.legacyOnline}，itemSourceId=${r.legacySource}`,
+  });
+
+  results.push({
+    name: 'N5. 不同源的 id 前缀不同（避免 mid 撞车）',
+    ok: r.legacyOnlineToItemId === 'kugou:kg-1',
+    detail: `onlineToItem(酷狗).id = ${r.legacyOnlineToItemId}`,
+  });
+}
+
 async function run() {
   const { workArea } = screen.getPrimaryDisplay();
 
@@ -1042,6 +1124,7 @@ async function run() {
   await testLyricBind();
   await testPlayWithoutLyrics();
   await testEmptyStateSearchButton();
+  await testSourceLabeling();
 
   console.log('\n================ 回归测试结果 ================');
   for (const r of results) {

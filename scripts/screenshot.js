@@ -74,21 +74,39 @@ ipcMain.handle('overlay:set-visible', () => state.settings);
 ipcMain.handle('overlay:update-settings', () => state.settings);
 ipcMain.handle('overlay:reset-position', () => true);
 
-/* 真实走一遍 QQ 音乐接口，截图里才是真数据 */
-ipcMain.handle('qq:search', async (_e, keyword) => {
+/*
+ * 真实走一遍音乐源接口，截图里就是真数据。
+ * 走 sources 注册表，所以截图会自动反映当前支持哪些源。
+ */
+const sources = require('../src/main/sources');
+
+ipcMain.handle('source:list', () => sources.listSources());
+
+ipcMain.handle('source:search', async (_e, id, keyword) => {
   try {
-    return { ok: true, songs: await qqmusic.search(keyword) };
+    return { ok: true, songs: await sources.getSource(id).search(keyword) };
   } catch (err) {
     return { ok: false, error: err.message, songs: [] };
   }
 });
-ipcMain.handle('qq:load', async (_e, song) => {
+
+ipcMain.handle('source:load', async (_e, id, song) => {
   try {
-    const lyric = await qqmusic.getLyric(song.mid);
-    return { ok: true, track: { ...song, source: 'qq' }, lyric };
+    const provider = sources.getSource(id);
+    const lyric = await provider.getLyric(song);
+    return { ok: true, track: { ...song, source: provider.id }, lyric: lyric || null };
   } catch (err) {
     return { ok: false, error: err.message };
   }
+});
+
+ipcMain.handle('source:playurl', async (_e, id, song) => {
+  const provider = sources.getSource(id);
+  if (!provider.canPlay || typeof provider.getSongUrl !== 'function') {
+    return { ok: false, mid: song.mid, error: `${provider.label}不支持播放` };
+  }
+  const info = await provider.getSongUrl(song);
+  return { ...info, mid: song.mid };
 });
 
 ipcMain.handle('audio:pick', async () => []);

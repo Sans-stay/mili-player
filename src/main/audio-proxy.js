@@ -67,15 +67,50 @@ function withHost(url, host) {
   }
 }
 
-function upstreamHeaders(qqSession, range) {
+function hostOf(url) {
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+const isQqUrl = (url) => /(^|\.)qq\.com$/.test(hostOf(url));
+
+/**
+ * 按上游域名挑 Referer。
+ * 以前这里写死成 y.qq.com —— 那对 QQ 是对的，但把网易云/酷狗的地址
+ * 也带上 QQ 的 Referer，有的 CDN 直接就拒了。
+ */
+function refererFor(url) {
+  const host = hostOf(url);
+  if (/(^|\.)(163\.com|126\.net|music\.126\.net)$/.test(host)) return 'https://music.163.com/';
+  if (/(^|\.)kugou\.com$/.test(host)) return 'https://www.kugou.com/';
+  if (/(^|\.)qq\.com$/.test(host)) return 'https://y.qq.com/';
+  return '';
+}
+
+function upstreamHeaders(url, session, range) {
   const headers = {
     'User-Agent': UA,
-    Referer: 'https://y.qq.com/',
-    Origin: 'https://y.qq.com',
     Accept: '*/*',
   };
-  const cookie = qqSession && qqSession.cookieHeader ? qqSession.cookieHeader() : '';
-  if (cookie) headers.Cookie = cookie;
+
+  const referer = refererFor(url);
+  if (referer) {
+    headers.Referer = referer;
+    headers.Origin = referer.replace(/\/$/, '');
+  }
+
+  /*
+   * 只有 QQ 的域名才带登录态。
+   * 把 QQ 的 cookie 发给网易云/酷狗既没用，又白白泄露 —— 这一条别省。
+   */
+  if (isQqUrl(url)) {
+    const cookie = session && session.cookieHeader ? session.cookieHeader() : '';
+    if (cookie) headers.Cookie = cookie;
+  }
+
   if (range) headers.Range = range;
   return headers;
 }
@@ -84,19 +119,24 @@ function upstreamHeaders(qqSession, range) {
  * 预检：主进程先要一小段数据，确认真能拿到音频。
  * 拿到真实状态码后才能给出「到底为什么放不了」。
  */
-async function preflight(url, qqSession) {
+async function preflight(rawUrl, session) {
   const tried = [];
 
-  for (const host of CDN_HOSTS) {
-    const candidate = withHost(url, host);
-    let hostLabel = host;
-    try {
-      hostLabel = new URL(host).host;
-    } catch { /* 保持原样 */ }
+  /*
+   * QQ 的地址要挨个 CDN 入口试（它的播放地址经常给一个不通的入口）。
+   * 其它源直接把原地址试一次就行 —— 对它们做「换 host」只会得到一个
+   * 张冠李戴的 URL，肯定失败。
+   */
+  const candidates = isQqUrl(rawUrl)
+    ? CDN_HOSTS.map((host) => withHost(rawUrl, host))
+    : [rawUrl];
+
+  for (const candidate of candidates) {
+    const hostLabel = hostOf(candidate) || candidate;
 
     try {
       const res = await fetch(candidate, {
-        headers: upstreamHeaders(qqSession, 'bytes=0-2047'),
+        headers: upstreamHeaders(candidate, session, 'bytes=0-2047'),
         signal: AbortSignal.timeout(15000),
       });
       const buf = Buffer.from(await res.arrayBuffer());
@@ -133,7 +173,7 @@ async function preflight(url, qqSession) {
 }
 
 /** app ready 之后调用 */
-function installHandler(qqSession) {
+function installHandler(session) {
   protocol.handle(SCHEME, async (request) => {
     let upstream;
     try {
@@ -145,7 +185,7 @@ function installHandler(qqSession) {
     const range = request.headers.get('range') || request.headers.get('Range');
     try {
       const res = await fetch(upstream, {
-        headers: upstreamHeaders(qqSession, range),
+        headers: upstreamHeaders(upstream, session, range),
       });
 
       const headers = new Headers();

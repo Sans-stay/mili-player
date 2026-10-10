@@ -42,6 +42,12 @@ contextBridge.exposeInMainWorld('mili', {
   // 加入歌单前先确认这首歌真能播（没版权/需要 VIP 的就不进歌单）
   qqCheckPlayable: (song) => ipcRenderer.invoke('qq:checkPlayable', song),
 
+  // 多音乐源：QQ / 网易云 / 酷狗。渲染层只认 sourceId
+  sourceList: () => ipcRenderer.invoke('source:list'),
+  sourceSearch: (sourceId, keyword) => ipcRenderer.invoke('source:search', sourceId, keyword),
+  sourceLoad: (sourceId, song) => ipcRenderer.invoke('source:load', sourceId, song),
+  sourcePlayUrl: (sourceId, song) => ipcRenderer.invoke('source:playurl', sourceId, song),
+
   onState: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('mili:state', handler);

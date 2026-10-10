@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const { parse, parseQrc, attachTranslation, findLineIndex, formatTime } = window.MiliLyric;
+const { parse, parseQrc, parseKrc, attachTranslation, findLineIndex, formatTime } = window.MiliLyric;
 const { TRACK, LRC } = window.MiliDemo;
 
 const $ = (id) => document.getElementById(id);
@@ -365,13 +365,19 @@ function localToItem(meta) {
   };
 }
 
-/** QQ 音乐搜索结果 -> 歌单项 */
-function qqToItem(song) {
+/**
+ * 在线曲目（任意源）-> 歌单项。
+ * id 必须带上源：不同源的 mid 可能撞车，不区分的话去重和绑定都会串。
+ */
+function onlineToItem(song) {
+  const sourceId = song.source || currentSource;
   return {
-    id: `qq:${song.mid}`,
-    kind: 'qq',
+    id: `${sourceId}:${song.mid}`,
+    kind: 'online',
+    source: sourceId,
     mid: song.mid,
     songMid: song.songMid || song.mid,
+    albumId: song.albumId,
     title: song.title || '未知曲目',
     artist: song.artist || '',
     album: song.album || '',
@@ -379,6 +385,13 @@ function qqToItem(song) {
     duration: Number(song.duration) || 0,
   };
 }
+
+/*
+ * 兼容早期只有 QQ 一种在线源时存下的歌单：那批数据的 kind 写的是 'qq'，
+ * 而且没有 source 字段。读的时候统一按「在线 + qq」处理，不用逼用户重建歌单。
+ */
+const isOnlineItem = (item) => Boolean(item) && (item.kind === 'online' || item.kind === 'qq');
+const itemSourceId = (item) => item.source || (item.kind === 'qq' ? 'qq' : '');
 
 const currentItem = () => (player.queueIndex >= 0 && player.queueIndex < playlist.items.length
   ? playlist.items[player.queueIndex]
@@ -625,9 +638,13 @@ function pickBestMatch(songs, meta) {
  *
  * 歌词本身不落盘，只在本次运行内缓存 —— 换个歌单文件大小基本没变。
  */
-const lyricCache = new Map();     // mid -> hit
+const lyricCache = new Map();     // `${source}:${mid}` -> hit
+
+/** 歌词缓存的键：必须带上源，否则两家的同一个 mid 会互相串 */
+const lyricKey = (sourceId, mid) => `${sourceId || 'qq'}:${mid}`;
 
 const bindingToSong = (bind) => ({
+  source: bind.source || 'qq',
   mid: bind.mid,
   songMid: bind.songMid || bind.mid,
   title: bind.title || '',
@@ -635,15 +652,16 @@ const bindingToSong = (bind) => ({
   album: bind.album || '',
 });
 
-/** 歌单里还有多少项引用这个 mid */
-function lyricBindCount(mid) {
-  return playlist.items.filter((it) => it.lyricBind && it.lyricBind.mid === mid).length;
+/** 歌单里还有多少项绑定到这个「源 + mid」 */
+function lyricBindCount(key) {
+  return playlist.items.filter((it) => it.lyricBind
+    && lyricKey(it.lyricBind.source, it.lyricBind.mid) === key).length;
 }
 
 /** 丢掉已经没人引用的歌词缓存（删歌 / 解绑时调） */
 function pruneLyricCache() {
-  for (const mid of [...lyricCache.keys()]) {
-    if (!lyricBindCount(mid)) lyricCache.delete(mid);
+  for (const key of [...lyricCache.keys()]) {
+    if (!lyricBindCount(key)) lyricCache.delete(key);
   }
 }
 
@@ -651,6 +669,7 @@ function pruneLyricCache() {
 function setLyricBind(item, song) {
   if (!item || item.kind !== 'local') return;
   item.lyricBind = {
+    source: song.source || 'qq',
     mid: song.mid,
     songMid: song.songMid || song.mid,
     title: song.title || '',
@@ -664,26 +683,33 @@ function setLyricBind(item, song) {
 /** 解绑，并把它独占的歌词缓存一起丢掉 */
 function clearLyricBind(item) {
   if (!item || !item.lyricBind) return;
-  const { mid } = item.lyricBind;
+  const key = lyricKey(item.lyricBind.source, item.lyricBind.mid);
   delete item.lyricBind;
-  if (!lyricBindCount(mid)) lyricCache.delete(mid);
+  if (!lyricBindCount(key)) lyricCache.delete(key);
   savePlaylistSoon();
   renderPlaylist();
 }
 
-/** 取一首 QQ 音乐的歌词并解析；失败返回 null。同一个 mid 本次运行内只取一次 */
+/** 取一首歌的歌词并解析；失败返回 null。同一个「源 + mid」本次运行内只取一次 */
 async function fetchLyrics(song) {
   if (!song || !song.mid) return null;
 
-  const cached = lyricCache.get(song.mid);
+  const sourceId = song.source || 'qq';
+  const cacheKey = `${sourceId}:${song.mid}`;
+
+  const cached = lyricCache.get(cacheKey);
   if (cached) return cached;
 
-  const res = await window.mili.loadQQSong(song);
-  if (!res.ok) return null;
+  const res = await window.mili.sourceLoad(sourceId, song);
+  // lyric 为 null = 这首歌确实没歌词（纯音乐、冷门曲目），正常结果
+  if (!res.ok || !res.lyric) return null;
 
-  const lyric = res.lyric || {};
-  let parsed = lyric.qrc ? parseQrc(lyric.qrc) : null;
-  if ((!parsed || !parsed.lines.length) && lyric.lrc) parsed = parse(lyric.lrc);
+  const lyric = res.lyric;
+  let parsed = null;
+  if (lyric.format === 'qrc') parsed = parseQrc(lyric.content);
+  else if (lyric.format === 'krc') parsed = parseKrc(lyric.content);
+  else parsed = parse(lyric.content || '');
+
   if (!parsed || !parsed.lines.length) return null;
 
   if (lyric.trans) {
@@ -691,10 +717,9 @@ async function fetchLyrics(song) {
   }
 
   const hit = { parsed, track: res.track, hasWordTiming: Boolean(lyric.hasWordTiming) };
-  lyricCache.set(song.mid, hit);
+  lyricCache.set(cacheKey, hit);
   return hit;
 }
-
 /** 把一份歌词挂到界面上（绑定命中和自动匹配成功都走这里） */
 function applyLyricHit(hit) {
   setLyrics(hit.parsed.lines, hit.track.duration || player.lyricDuration);
@@ -739,21 +764,26 @@ async function autoMatchLyrics(meta) {
     return;
   }
 
-  toast(`正在为《${meta.title}》匹配歌词…`, 8000);
-  const res = await window.mili.searchQQ(query);
+  // 用搜索面板里当前选中的源来配 —— 换了源，本地曲目的自动匹配也跟着换
+  const source = currentSourceInfo();
+  const pickFrom = (song) => ({ ...song, source: song.source || source.id });
+
+  toast(`正在 ${source.label} 为《${meta.title}》匹配歌词…`, 8000);
+  const res = await window.mili.sourceSearch(source.id, query);
   if (!res.ok || !res.songs.length) {
-    setLyricsPlaceholder('none', 'QQ 音乐里没搜到这首歌，可以手动搜索');
-    toast('没能匹配到歌词，可点放大镜手动搜索');
+    setLyricsPlaceholder('none', `${source.label} 里没搜到这首歌，可以手动搜索`);
+    toast(`没能匹配到歌词，可点放大镜去 ${source.label} 手动搜索`);
     return;
   }
 
-  const song = pickBestMatch(res.songs, meta);
-  if (!song) {
+  const picked = pickBestMatch(res.songs, meta);
+  if (!picked) {
     setLyricsPlaceholder('none', '没有找到足够接近的版本，可以手动搜索');
     toast('没找到足够接近的歌词，可点放大镜手动搜索');
     return;
   }
 
+  const song = pickFrom(picked);
   const hit = await fetchLyrics(song);
   if (!hit) {
     setLyricsPlaceholder('none', '匹配到了歌曲，但它没有可用的歌词');
@@ -943,7 +973,10 @@ function initTrack() {
   $('title').textContent = track.title || '未在播放';
   $('artist').textContent = track.artist || '—';
   $('album').textContent = track.album || '';
-  $('badge').textContent = track.source === 'demo' ? '演示' : (track.source === 'local' ? '本地' : 'QQ 音乐');
+  // 徽标按**实际来源**显示。以前非 demo / 非本地的都写死成「QQ 音乐」，
+  // 播网易云、酷狗的歌时也显示 QQ 音乐，属于误导
+  $('badge').textContent = track.source === 'demo' ? '演示'
+    : (track.source === 'local' ? '本地' : sourceInfo(track.source).label);
 
   if (track.cover) {
     const coverUrl = `url("${track.cover}")`;
@@ -1451,8 +1484,9 @@ function createPlaylistRow(item, index) {
   title.textContent = item.title;
   const sub = document.createElement('div');
   sub.className = 'pl-sub';
-  if (item.kind === 'qq') {
-    sub.textContent = [item.artist, 'QQ 音乐'].filter(Boolean).join(' · ');
+  if (isOnlineItem(item)) {
+    sub.textContent = [item.artist, sourceInfo(itemSourceId(item)).label]
+      .filter(Boolean).join(' · ');
   } else if (item.lyricBind) {
     sub.textContent = [item.artist, `歌词绑定「${item.lyricBind.title}」`]
       .filter(Boolean).join(' · ');
@@ -1470,7 +1504,6 @@ function createPlaylistRow(item, index) {
   });
   row.appendChild(main);
 
-  // 本地曲目才有「绑定歌词」：自动配错时手动指定，顺便记下来免得下次再搜
   if (item.kind === 'local') {
     const bind = document.createElement('button');
     bind.className = `pl-bind${item.lyricBind ? ' bound' : ''}`;
@@ -1727,6 +1760,49 @@ function keywordFor(track) {
   return [src.title, artist].filter(Boolean).join(' ').trim();
 }
 
+/** 当前选中的音乐源 */
+let currentSource = 'qq';
+let sourceMeta = [{ id: 'qq', label: 'QQ 音乐', canPlay: true }];
+
+const sourceInfo = (id) => sourceMeta.find((s) => s.id === id) || sourceMeta[0];
+const currentSourceInfo = () => sourceInfo(currentSource);
+
+function renderSourcePicker() {
+  const box = $('sourcePicker');
+  if (!box) return;
+
+  box.innerHTML = '';
+  sourceMeta.forEach((s) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = s.label;
+    btn.title = s.canPlay
+      ? `${s.label}：可搜索、可取歌词、可在线播放`
+      : `${s.label}：只有搜索和歌词，不支持在线播放（拿来配本地曲目正合适）`;
+    btn.classList.toggle('on', s.id === currentSource);
+
+    btn.addEventListener('click', () => {
+      if (currentSource === s.id) return;
+      currentSource = s.id;
+      renderSourcePicker();
+      // 已经有关键词就立刻按新源重搜，省得再按一次回车
+      if ($('searchInput').value.trim()) doSearch();
+    });
+    box.appendChild(btn);
+  });
+}
+
+/** 启动时把源列表拉回来（主进程注册了哪些源） */
+async function loadSources() {
+  try {
+    const list = await window.mili.sourceList();
+    if (Array.isArray(list) && list.length) sourceMeta = list;
+  } catch (err) {
+    console.warn('[mili] 读取音乐源列表失败：', err && err.message ? err.message : err);
+  }
+  renderSourcePicker();
+}
+
 /**
  * 打开搜索面板，把关键词填进输入框并直接搜一次。
  * 玩家点「手动搜索歌词」、或从歌单点「词」时都走这里 ——
@@ -1799,9 +1875,13 @@ function renderResults(songs) {
     row.appendChild(main);
 
     // 右侧：在线播放
+    const source = sourceInfo(song.source || currentSource);
     const play = document.createElement('button');
     play.className = 'result-play';
-    play.title = qqLoggedIn ? '在线播放' : '登录后可在线播放';
+    play.disabled = !source.canPlay;
+    play.title = !source.canPlay
+      ? `${source.label}不支持在线播放，但可以取歌词`
+      : (qqLoggedIn ? '在线播放' : '登录后可在线播放');
     play.innerHTML = '<svg viewBox="0 0 24 24" class="ico fill"><path d="M8 5.2v13.6L19 12z"/></svg>';
     play.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -1831,16 +1911,17 @@ async function doSearch() {
   const keyword = $('searchInput').value.trim();
   if (!keyword) return;
 
+  const source = currentSourceInfo();
   $('searchResults').innerHTML = '';
-  setSearchStatus('搜索中…');
+  setSearchStatus(`正在 ${source.label} 搜索…`);
 
-  const res = await window.mili.searchQQ(keyword);
+  const res = await window.mili.sourceSearch(source.id, keyword);
   if (!res.ok) {
-    setSearchStatus(`搜索失败：${res.error}`, true);
+    setSearchStatus(`${source.label} 搜索失败：${res.error}`, true);
     return;
   }
   if (!res.songs.length) {
-    setSearchStatus('没有找到结果', true);
+    setSearchStatus(`${source.label} 里没有找到结果`, true);
     return;
   }
   setSearchStatus(`找到 ${res.songs.length} 首 · 点歌名载入歌词 · ▶ 在线播放 · ＋ 加入歌单`);
@@ -1894,7 +1975,8 @@ async function toggleLogin() {
 
 /** 取播放地址并把 <audio> 指过去；返回是否成功 */
 async function attachOnlineAudio(song) {
-  const info = await window.mili.qqPlayUrl(song);
+  const sourceId = song.source || 'qq';
+  const info = await window.mili.sourcePlayUrl(sourceId, song);
 
   if (!info.ok) {
     const detail = Array.isArray(info.detail) && info.detail.length ? info.detail.join('；') : '';
@@ -1948,7 +2030,7 @@ async function loadQQSong(song, item) {
     document.body.classList.remove('playing');
     setPlayIcon(false);
 
-    player.track = { ...hit.track, source: 'qq' };
+    player.track = { ...hit.track, source: hit.track.source || song.source || 'qq' };
     initTrack();
     setLyrics(hit.parsed.lines, hit.track.duration);
     seek(0);
@@ -1982,7 +2064,13 @@ async function playQQSong(song) {
   }
 
   stopAudio();
-  player.track = { ...(hit ? hit.track : song), source: 'qq' };
+  /*
+   * source 一定要跟着歌走。
+   * 以前这里写死 source: 'qq'，播网易云的歌时 player.track.source 会被改成 qq ——
+   * 徽标显示错是小事，歌单里的在线项也会因此拿 QQ 的接口去取地址，直接放不出来。
+   */
+  const trackSource = song.source || (hit && hit.track && hit.track.source) || 'qq';
+  player.track = { ...(hit ? hit.track : song), source: trackSource };
   initTrack();
 
   if (hit) {
@@ -2012,12 +2100,18 @@ async function playQQSong(song) {
  * 否则歌单里会攒一堆点开就失败的歌。
  */
 async function addQQToPlaylist(song, btn) {
-  if (!qqLoggedIn) {
+  const source = sourceInfo(song.source || currentSource);
+
+  if (!source.canPlay) {
+    toast(`${source.label}只能取歌词，不能加入歌单（歌单里的在线曲目要能播放）`, 6000);
+    return;
+  }
+  if (source.id === 'qq' && !qqLoggedIn) {
     toast('需要先登录 QQ 音乐才能加入歌单');
     return;
   }
 
-  if (playlist.items.some((it) => it.id === `qq:${song.mid}`)) {
+  if (playlist.items.some((it) => it.id === `${source.id}:${song.mid}`)) {
     toast(`《${song.title}》已经在歌单里了`);
     return;
   }
@@ -2027,7 +2121,9 @@ async function addQQToPlaylist(song, btn) {
 
   let check;
   try {
-    check = await window.mili.qqCheckPlayable(song);
+    // 用「真的去取一次播放地址」来验证 —— 比单独写一套判断更可靠，
+    // 而且对每个源都通用，不会出现「加得进去却放不出来」
+    check = await window.mili.sourcePlayUrl(source.id, song);
   } catch (err) {
     check = { ok: false, error: err.message };
   }
@@ -2042,12 +2138,20 @@ async function addQQToPlaylist(song, btn) {
     return;
   }
 
-  addPlaylistItems([qqToItem(song)]);
+  addPlaylistItems([onlineToItem(song)]);
   toast(`已加入歌单：《${song.title}》${check.quality ? `（${check.quality}）` : ''}`);
 }
 
 /** 点搜索结果右侧的 ▶ */
-async function playQQRow(song, btn) {  if (!qqLoggedIn) {
+async function playQQRow(song, btn) {
+  const source = sourceInfo(song.source || currentSource);
+
+  if (!source.canPlay) {
+    toast(`${source.label}只能取歌词，不支持在线播放`, 5000);
+    return;
+  }
+  // 只有 QQ 需要登录（别的源匿名就能拿地址）
+  if (source.id === 'qq' && !qqLoggedIn) {
     toast('需要先登录 QQ 音乐才能在线播放');
     return;
   }
@@ -2217,6 +2321,7 @@ async function init() {
   bindAudio();
   bindDrop();
 
+  await loadSources();
   await loadPlaylist();
   await publishSafe();
 
