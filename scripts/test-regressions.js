@@ -97,11 +97,23 @@ ipcMain.handle('qq:search', (_e, keyword) => {
   return { ok: true, songs: [] };
 });
 
-ipcMain.handle('qq:load', () => ({
-  ok: true,
-  track: BIND_SONG,
-  lyric: { lrc: '[00:00.00]绑定第一句\n[00:03.00]绑定第二句', hasWordTiming: false },
-}));
+/* 一首「没有歌词但能播」的曲子（纯音乐），用来验证歌词不该挡住播放 */
+const NOLYRIC_SONG = {
+  mid: 'nolyric-001', songMid: 'nolyric-001',
+  title: '纯音乐测试', artist: '测试', album: '', duration: 120,
+};
+
+ipcMain.handle('qq:load', (_e, song) => {
+  // 纯音乐：既没有 qrc 也没有 lrc
+  if (song && song.mid === NOLYRIC_SONG.mid) {
+    return { ok: true, track: NOLYRIC_SONG, lyric: {} };
+  }
+  return {
+    ok: true,
+    track: BIND_SONG,
+    lyric: { lrc: '[00:00.00]绑定第一句\n[00:03.00]绑定第二句', hasWordTiming: false },
+  };
+});
 
 /* 歌单：测试期间不落盘，也不读真实歌单（免得跑测试改到用户的数据） */
 ipcMain.handle('playlist:load', () => ({ playMode: 'list', items: [] }));
@@ -109,7 +121,16 @@ ipcMain.handle('playlist:save', (_e, payload) => ({ ok: true, count: (payload.it
 ipcMain.handle('audio:pickFolder', () => ({ ok: true, files: [], truncated: false }));
 ipcMain.handle('qq:login', () => ({ ok: false, canceled: true, error: '测试宿主未接入登录' }));
 ipcMain.handle('qq:logout', () => ({ loggedIn: false, uin: '', hasKey: false }));
-ipcMain.handle('qq:playurl', (_e, song) => ({ ok: false, needLogin: true, error: '需要先登录 QQ 音乐', mid: song.mid }));
+/* 只有纯音乐那首能拿到播放地址，别的照旧回「未登录」，用来测取地址失败的分支 */
+ipcMain.handle('qq:playurl', (_e, song) => {
+  if (song && song.mid === NOLYRIC_SONG.mid) {
+    return {
+      ok: true, mid: song.mid, quality: '320kbps',
+      url: 'mili-audio://stream/dGVzdA', contentType: 'audio/mpeg',
+    };
+  }
+  return { ok: false, needLogin: true, error: '需要先登录 QQ 音乐', mid: song && song.mid };
+});
 
 /**
  * 读取悬浮窗里所有「还在屏幕上」的散落字幕。
@@ -765,7 +786,7 @@ async function testLyricBind() {
 
   // 第一次播放：没有绑定 -> 走自动匹配 -> 成功后应当记下绑定
   await playerWin.webContents.executeJavaScript(`playIndex(0)`);
-  await sleep(1600);
+  await sleep(2600);   // 冷启动时 IPC 往返偏慢，留足余量
 
   const first = await playerWin.webContents.executeJavaScript(`
     (function () {
@@ -797,7 +818,7 @@ async function testLyricBind() {
   // 顺便把主进程收到的歌词清空，好验证「绑定这条路径也会推歌词给悬浮窗」
   state.lines = [];
   await playerWin.webContents.executeJavaScript(`playIndex(0)`);
-  await sleep(1400);
+  await sleep(2000);
   const searchAfterSecond = qqSearchCalls;
   const publishedLines = state.lines.length;
 
@@ -883,6 +904,42 @@ async function testLyricBind() {
   });
 }
 
+/**
+ * 没有歌词的曲子也必须能播。
+ * 这是真出现过的 bug：playQQSong 一拿到 null 歌词就 return false，
+ * 表现是「点 ▶ 没反应」—— 纯音乐一首都放不了。
+ */
+async function testPlayWithoutLyrics() {
+  const r = await playerWin.webContents.executeJavaScript(`
+    (async () => {
+      const started = await playQQSong({
+        mid: 'nolyric-001', songMid: 'nolyric-001',
+        title: '纯音乐测试', artist: '测试', duration: 120,
+      });
+      return {
+        started: started,
+        playing: player.playing,
+        hasAudio: hasAudio(),
+        lines: player.lines.length,
+        placeholder: Boolean(document.querySelector('.lyrics-empty')),
+        title: document.getElementById('title').textContent,
+      };
+    })()
+  `);
+
+  results.push({
+    name: 'L1. 没有歌词的曲目照样能播放',
+    ok: r.started === true && r.playing === true && r.hasAudio === true,
+    detail: `playQQSong 返回 ${r.started}，playing=${r.playing}，已挂载音频=${r.hasAudio}`,
+  });
+
+  results.push({
+    name: 'L2. 无歌词时显示空状态，而不是留着上一首的歌词',
+    ok: r.lines === 0 && r.placeholder && r.title === '纯音乐测试',
+    detail: `歌词 ${r.lines} 句，空状态=${r.placeholder}，曲名「${r.title}」`,
+  });
+}
+
 async function run() {
   const { workArea } = screen.getPrimaryDisplay();
 
@@ -936,6 +993,7 @@ async function run() {
   await testPlayModes();
   await testLyricOffset();
   await testLyricBind();
+  await testPlayWithoutLyrics();
 
   console.log('\n================ 回归测试结果 ================');
   for (const r of results) {

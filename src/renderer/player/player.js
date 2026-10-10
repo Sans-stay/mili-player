@@ -1911,7 +1911,8 @@ async function loadQQSong(song, item) {
   if (item) item.classList.remove('loading');
 
   if (!hit) {
-    setSearchStatus('这首歌没有可用歌词', true);
+    // 没歌词不代表不能听 —— 说清楚，免得用户以为这首歌废了
+    setSearchStatus('这首歌没有歌词，但仍然可以点 ▶ 播放', true);
     return;
   }
 
@@ -1948,20 +1949,33 @@ async function loadQQSong(song, item) {
     (hit.hasWordTiming ? '逐字时间戳' : '逐行时间戳（已自动细分到字）'));
 }
 
-/** 载入歌词 + 取播放地址 + 开始播放 */
+/**
+ * 取歌词 + 取播放地址 + 开始播放。
+ *
+ * 歌词取不到**不能**挡住播放 —— 纯音乐、冷门曲目本来就没有歌词。
+ * 以前这里拿不到歌词就直接 return false，用户看到的就是「点 ▶ 没反应」。
+ * 现在照常出声，只是歌词区显示空状态。
+ */
 async function playQQSong(song) {
-  const hit = await fetchLyrics(song);
-  if (!hit) {
-    toast('这首歌没有可用歌词，没法播放');
-    return false;
+  let hit = null;
+  try {
+    hit = await fetchLyrics(song);
+  } catch (err) {
+    console.warn('[mili] 取歌词失败，仍然继续播放：', err && err.message ? err.message : err);
   }
 
   stopAudio();
-  player.track = { ...hit.track, source: 'qq' };
+  player.track = { ...(hit ? hit.track : song), source: 'qq' };
   initTrack();
-  setLyrics(hit.parsed.lines, hit.track.duration);
+
+  if (hit) {
+    setLyrics(hit.parsed.lines, hit.track.duration);
+  } else {
+    setLyrics([], 0);
+    setLyricsPlaceholder('none', '这首歌没有可用的歌词，但可以正常播放');
+    console.log('[mili] 这首歌没有歌词，只出声不显示字幕：', song.title);
+  }
   seek(0);
-  maybeAutoTheme(hit.track, '在线播放');
 
   if (!await attachOnlineAudio(song)) {
     pause();
@@ -1969,6 +1983,7 @@ async function playQQSong(song) {
     return false;
   }
 
+  if (hit) maybeAutoTheme(hit.track, '在线播放');
   play();
   await publishSafe();
   return true;
